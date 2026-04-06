@@ -1,0 +1,30 @@
+@echo off
+
+::: ============================================================
+::: llama-sse-proxy 配置文件
+::: 复制此文件为 config.bat，修改下面的值即可
+::: ============================================================
+
+::: Python 解释器路径（留空则自动查找 PATH 中的 python）
+set "PYTHON="
+
+::: 代理脚本路径（留空则使用相对路径）
+set "SCRIPT="
+
+::: llama.cpp 后端地址
+set "BACKEND=http://localhost:8080"
+
+::: 本地监听端口
+set "PORT=8081"
+
+::: 日志文件（留空则只输出到 stdout）
+set "LOG="
+
+::: Ollama 兼容模式模型名称（如 gemma4:26b-a4b）
+::: 设置后暴露 /api/chat, /api/generate, /api/tags 端点
+::: 留空则禁用（纯 OpenAI 兼容透传）
+set "OLLAMA_MODEL="
+
+::: OpenClaw sessions.json 路径（用于自动 patch token 计数）
+::: 留空则使用默认路径: %USERPROFILE%\.openclaw\agents\main\sessions\sessions.json
+set "SESSIONS_JSON="
