@@ -639,19 +639,42 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         log.info(format % args)
 
+    def handle(self):
+        """Override to suppress connection reset errors on close."""
+        try:
+            super().handle()
+        except (ConnectionResetError, OSError, ValueError):
+            # Client closed connection early or socket already closed, ignore
+            pass
+
     def do_GET(self):
         path = self.path.split("?")[0]  # strip query params
 
-        # Health check
+        # Health check - returns proxy status and backend connectivity
         if path == "/health":
-            body = b"ok"
+            # Check backend connectivity
+            backend_ok = False
+            try:
+                req = urllib.request.Request(BACKEND, method="HEAD")
+                req.add_header("Accept", "*/*")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    backend_ok = True
+            except Exception:
+                backend_ok = False
+            
+            status_emoji = "✅" if backend_ok else "❌"
+            body = f"""Status: OK
+
+Proxy:   RUNNING
+Backend: {status_emoji} {'CONNECTED' if backend_ok else 'DISCONNECTED'}
+URL:     {BACKEND}
+""".encode()
+            
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
-            self.wfile.flush()
             return
 
         # Ollama API endpoints
