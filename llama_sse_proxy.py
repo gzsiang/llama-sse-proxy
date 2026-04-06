@@ -449,6 +449,9 @@ def _handle_ollama_chat_stream(handler, openai_body, model_name):
                 handler.wfile.write((json.dumps(ollama_chunk, ensure_ascii=False) + "\n").encode("utf-8"))
                 handler.wfile.flush()
                 sent += 1
+        except (BrokenPipeError, ConnectionResetError):
+            log.info("Client disconnected, stopping Ollama chat stream")
+            break
         except Exception as e:
             log.error(f"Error writing chunk: {e}")
             break
@@ -606,6 +609,9 @@ def _handle_ollama_generate_stream(handler, openai_body, model_name):
                 }
                 handler.wfile.write((json.dumps(ollama_chunk, ensure_ascii=False) + "\n").encode("utf-8"))
                 handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            log.info("Client disconnected, stopping Ollama generate stream")
+            break
         except Exception:
             pass
 
@@ -900,6 +906,9 @@ URL:     {BACKEND}
                 self.wfile.flush()
             except queue.Empty:
                 log.error("Queue timeout in stream_post")
+                break
+            except (BrokenPipeError, ConnectionResetError):
+                log.info("Client disconnected, stopping SSE stream")
                 break
             except Exception as e:
                 log.error(f"stream write error: {e}")
