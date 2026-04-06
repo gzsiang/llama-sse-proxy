@@ -96,10 +96,35 @@ OpenClaw 的上下文管理机制依赖流式响应中的 `usage` 字段：
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
+| `--config` | _(无)_ | JSON 配置文件路径 |
 | `--backend` | `http://localhost:8080` | 后端地址（llama.cpp / LM Studio / vLLM） |
 | `--port` | `8081` | 代理监听端口 |
 | `--log-file` | _(仅输出到 stdout)_ | 可选，指定日志文件路径 |
+| `--ollama-model` | _(无)_ | 启用 Ollama API 兼容模式 |
 | `--timeout` | `1800` | 流式读取超时时间（秒），默认30分钟 |
+
+### 配置文件
+
+除了命令行参数，也可以使用 JSON 配置文件：
+
+```bash
+# 使用配置文件启动
+python llama_sse_proxy.py --config config.json
+```
+
+复制 `config.json.example` 为 `config.json`，按需修改：
+
+```json
+{
+  "backend": "http://localhost:8080",
+  "port": 8081,
+  "timeout": 1800,
+  "log_file": null,
+  "ollama_model": null
+}
+```
+
+**优先级**：命令行参数 > 配置文件 > 默认值
 
 ### 示例：连接远程后端
 

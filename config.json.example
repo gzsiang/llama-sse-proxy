@@ -1,0 +1,7 @@
+{
+  "backend": "http://localhost:8080",
+  "port": 8081,
+  "timeout": 1800,
+  "log_file": null,
+  "ollama_model": null
+}

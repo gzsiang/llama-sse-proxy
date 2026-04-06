@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -954,7 +954,7 @@ URL:     {BACKEND}
         self.end_headers()
 
 
-class ThreadedServer(HTTPServer):
+class ThreadedServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
@@ -965,10 +965,34 @@ class ThreadedServer(HTTPServer):
         mode = f" + Ollama mode (model={OLLAMA_MODEL})" if OLLAMA_MODEL else ""
         log.info(f"llama-sse-proxy: 0.0.0.0:{port} -> {backend}{mode}")
 
+    def process_request(self, request, client_address):
+        """Override to handle each request in a new thread."""
+        import threading
+        t = threading.Thread(target=self.process_request_thread,
+                            args=(request, client_address))
+        t.daemon = self.daemon_threads
+        t.start()
+
+
+def load_config(config_path):
+    """Load configuration from JSON file."""
+    if not config_path or not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        log.error(f"Failed to load config file: {e}")
+        return {}
+
 
 def main():
     parser = argparse.ArgumentParser(
         description="Proxy that injects usage field into llama.cpp SSE streams."
+    )
+    parser.add_argument(
+        "--config", default=None,
+        help="Path to JSON config file (default: None)",
     )
     parser.add_argument(
         "--backend",
@@ -995,11 +1019,21 @@ def main():
     )
     args = parser.parse_args()
 
-    global OLLAMA_MODEL, STREAM_TIMEOUT
-    OLLAMA_MODEL = args.ollama_model
-    STREAM_TIMEOUT = args.timeout
+    # Load config file first
+    config = load_config(args.config)
 
-    setup_logging(args.log_file)
+    # Command line args override config file values
+    backend = args.backend if args.backend != parser.get_default("backend") else config.get("backend", args.backend)
+    port = args.port if args.port != parser.get_default("port") else config.get("port", args.port)
+    log_file = args.log_file if args.log_file is not None else config.get("log_file")
+    ollama_model = args.ollama_model if args.ollama_model is not None else config.get("ollama_model")
+    timeout = args.timeout if args.timeout != parser.get_default("timeout") else config.get("timeout", args.timeout)
+
+    global OLLAMA_MODEL, STREAM_TIMEOUT
+    OLLAMA_MODEL = ollama_model
+    STREAM_TIMEOUT = timeout
+
+    setup_logging(log_file)
 
     global SHUTDOWN_EVENT
     SHUTDOWN_EVENT = threading.Event()
@@ -1011,7 +1045,7 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    server = ThreadedServer(args.port, args.backend)
+    server = ThreadedServer(port, backend)
     server.timeout = 0.5  # Allow Ctrl+C check every 500ms
     log.info("Ctrl+C to stop")
     log.info(f"stream timeout: %ds", STREAM_TIMEOUT)
