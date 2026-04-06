@@ -44,6 +44,20 @@ OLLAMA_MODEL = None  # Model name exposed via Ollama API
 # Stream timeout (seconds) — per-chunk interval for both fetch and main thread
 STREAM_TIMEOUT = 1800
 
+# Statistics tracking
+STATS = {
+    "start_time": time.time(),
+    "total_requests": 0,
+    "stream_requests": 0,
+    "non_stream_requests": 0,
+    "ollama_requests": 0,
+    "errors": 0,
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+}
+STATS_LOCK = threading.Lock()
+
 
 def setup_logging(log_file=None):
     handlers = [logging.StreamHandler(sys.stdout)]
@@ -297,9 +311,15 @@ def handle_ollama_api_chat(handler, body_bytes):
     Converts Ollama chat request to OpenAI /v1/chat/completions,
     then converts the response back to Ollama format.
     """
+    with STATS_LOCK:
+        STATS["total_requests"] += 1
+        STATS["ollama_requests"] += 1
+
     try:
         req_json = json.loads(body_bytes)
     except json.JSONDecodeError as e:
+        with STATS_LOCK:
+            STATS["errors"] += 1
         _send_json_response(handler, 400, {"error": f"Invalid JSON: {e}"})
         return
 
@@ -334,8 +354,12 @@ def handle_ollama_api_chat(handler, body_bytes):
     openai_body = json.dumps(openai_req, separators=(",", ":")).encode("utf-8")
 
     if stream:
+        with STATS_LOCK:
+            STATS["stream_requests"] += 1
         _handle_ollama_chat_stream(handler, openai_body, model_name)
     else:
+        with STATS_LOCK:
+            STATS["non_stream_requests"] += 1
         _handle_ollama_chat_nonstream(handler, openai_body, model_name)
 
 
@@ -485,9 +509,15 @@ def handle_ollama_api_generate(handler, body_bytes):
     Converts Ollama generate request to OpenAI /v1/completions,
     then converts the response back to Ollama format.
     """
+    with STATS_LOCK:
+        STATS["total_requests"] += 1
+        STATS["ollama_requests"] += 1
+
     try:
         req_json = json.loads(body_bytes)
     except json.JSONDecodeError as e:
+        with STATS_LOCK:
+            STATS["errors"] += 1
         _send_json_response(handler, 400, {"error": f"Invalid JSON: {e}"})
         return
 
@@ -515,8 +545,12 @@ def handle_ollama_api_generate(handler, body_bytes):
     openai_body = json.dumps(openai_req, separators=(",", ":")).encode("utf-8")
 
     if stream:
+        with STATS_LOCK:
+            STATS["stream_requests"] += 1
         _handle_ollama_generate_stream(handler, openai_body, model_name)
     else:
+        with STATS_LOCK:
+            STATS["non_stream_requests"] += 1
         _handle_ollama_generate_nonstream(handler, openai_body, model_name)
 
 
@@ -645,6 +679,17 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         log.info(format % args)
 
+    def _format_duration(self, seconds):
+        """Format duration in human-readable form."""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+        elif seconds < 86400:
+            return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+        else:
+            return f"{int(seconds // 86400)}d {int((seconds % 86400) // 3600)}h"
+
     def handle(self):
         """Override to suppress connection reset errors on close."""
         try:
@@ -655,6 +700,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]  # strip query params
+
+        # Statistics endpoint - returns proxy forwarding statistics
+        if path == "/stats":
+            with STATS_LOCK:
+                uptime = time.time() - STATS["start_time"]
+                stats_response = {
+                    "uptime_seconds": round(uptime, 2),
+                    "uptime_formatted": self._format_duration(uptime),
+                    "requests": {
+                        "total": STATS["total_requests"],
+                        "stream": STATS["stream_requests"],
+                        "non_stream": STATS["non_stream_requests"],
+                        "ollama": STATS["ollama_requests"],
+                    },
+                    "errors": STATS["errors"],
+                    "tokens": {
+                        "total": STATS["total_tokens"],
+                        "prompt": STATS["prompt_tokens"],
+                        "completion": STATS["completion_tokens"],
+                    },
+                }
+            body = json.dumps(stats_response, indent=2, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         # Health check - returns proxy status and backend connectivity
         if path == "/health":
@@ -739,6 +813,9 @@ URL:     {BACKEND}
                 return
 
         # OpenAI-compatible passthrough
+        with STATS_LOCK:
+            STATS["total_requests"] += 1
+
         try:
             req_json = json.loads(body)
             stream = req_json.get("stream", False)
@@ -757,8 +834,12 @@ URL:     {BACKEND}
             stream = False
 
         if stream:
+            with STATS_LOCK:
+                STATS["stream_requests"] += 1
             self._stream_post(body)
         else:
+            with STATS_LOCK:
+                STATS["non_stream_requests"] += 1
             self._non_stream_post(body)
 
     def _non_stream_post(self, body):
