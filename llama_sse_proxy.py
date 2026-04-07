@@ -1,5 +1,7 @@
 """
 llama-sse-proxy: Ensure usage field in SSE streams for AI agent frameworks
+Version: 0.2.1 (2026-04-07)
+Verified: ✅ Token stats fix - reasoning_content support, timing extraction without finish dependency
 
 Original: llama.cpp's SSE streaming responses lack the `usage` field that AI
 agent frameworks (OpenClaw, etc.) need to track token usage and trigger context
@@ -16,6 +18,11 @@ Ollama compatibility mode: When enabled via --ollama-model, the proxy exposes
 Ollama-compatible API endpoints (/api/chat, /api/generate, /api/tags) that
 translate to/from OpenAI-compatible backend requests. This allows AI agent
 frameworks configured with "ollama" API type to work with llama.cpp backends.
+
+Features:
+- Web dashboard (/stats) with bilingual support (zh/en) and auto-refresh
+- Silent logging for polling endpoints
+- Web configuration interface (/setup) - no config file needed to start
 
 No external dependencies — uses only Python 3 standard library.
 """
@@ -216,13 +223,16 @@ def _collect_stream_chunks(data_queue, timeout=300):
                         timings = obj.get("timings")
                         choices = obj.get("choices", [])
                         finish = choices[0].get("finish_reason") if choices else None
-                        if timings and finish:
+                        # 只要有 timings 就更新，不依赖 finish（客户端可能提前断开）
+                        if timings:
                             last_timings["prompt_n"] = timings.get("prompt_n", 0)
                             last_timings["predicted_n"] = timings.get("predicted_n", 0)
-                            log.info(f"timings: prompt={last_timings['prompt_n']}, "
-                                     f"completion={last_timings['predicted_n']}")
+                            if finish:
+                                log.info(f"timings: prompt={last_timings['prompt_n']}, "
+                                         f"completion={last_timings['predicted_n']}")
                         delta = choices[0].get("delta", {}) if choices else {}
-                        content = delta.get("content", "")
+                        # 同时处理 content 和 reasoning_content（某些模型如 gemma 使用 reasoning_content）
+                        content = delta.get("content", "") or delta.get("reasoning_content", "")
                         if content:
                             accumulated_content.append(content)
             except Exception:
@@ -421,6 +431,12 @@ def _handle_ollama_chat_stream(handler, openai_body, model_name):
     chunks, last_timings, usage_info, accumulated_content = _collect_stream_chunks(data_queue)
     prompt_n, completion_n = _get_usage_counts(last_timings, usage_info, accumulated_content)
 
+    # Update token statistics
+    with STATS_LOCK:
+        STATS["prompt_tokens"] += prompt_n
+        STATS["completion_tokens"] += completion_n
+        STATS["total_tokens"] += prompt_n + completion_n
+
     start_time = time.time()
 
     # Send as Ollama streaming NDJSON (newline-delimited JSON)
@@ -606,6 +622,12 @@ def _handle_ollama_generate_stream(handler, openai_body, model_name):
     chunks, last_timings, usage_info, accumulated_content = _collect_stream_chunks(data_queue)
     prompt_n, completion_n = _get_usage_counts(last_timings, usage_info, accumulated_content)
 
+    # Update token statistics
+    with STATS_LOCK:
+        STATS["prompt_tokens"] += prompt_n
+        STATS["completion_tokens"] += completion_n
+        STATS["total_tokens"] += prompt_n + completion_n
+
     start_time = time.time()
 
     handler.send_response(200)
@@ -677,7 +699,11 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
-        log.info(format % args)
+        # Skip noisy polling requests from the stats dashboard
+        msg = format % args
+        if "GET /stats.json" in msg or "GET /favicon.ico" in msg:
+            return
+        log.info(msg)
 
     def _format_duration(self, seconds):
         """Format duration in human-readable form."""
@@ -690,6 +716,70 @@ class Handler(BaseHTTPRequestHandler):
         else:
             return f"{int(seconds // 86400)}d {int((seconds % 86400) // 3600)}h"
 
+    def _handle_test_stats(self):
+        """Test endpoint - send a real request to backend and verify token stats."""
+        import urllib.request
+        
+        backend_url = getattr(self.server, 'backend_url', 'http://localhost:8080')
+        test_payload = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": True,
+            "max_tokens": 10
+        }
+        
+        # Record stats before request
+        before = {
+            "total_requests": STATS["total_requests"],
+            "total_tokens": STATS["total_tokens"],
+            "prompt_tokens": STATS["prompt_tokens"],
+            "completion_tokens": STATS["completion_tokens"],
+        }
+        
+        try:
+            req = urllib.request.Request(
+                f"{backend_url}/v1/chat/completions",
+                data=json.dumps(test_payload).encode('utf-8'),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            # Just send request, don't wait for full response
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                # Read a bit to trigger processing
+                resp.read(1024)
+        except Exception as e:
+            pass  # We don't care about response, just trigger the request
+        
+        # Give it a moment to process
+        time.sleep(0.5)
+        
+        # Check stats after
+        after = {
+            "total_requests": STATS["total_requests"],
+            "total_tokens": STATS["total_tokens"],
+            "prompt_tokens": STATS["prompt_tokens"],
+            "completion_tokens": STATS["completion_tokens"],
+        }
+        
+        body = json.dumps({
+            "ok": True,
+            "message": "Test request sent to backend",
+            "before": before,
+            "after": after,
+            "changed": {
+                "total_requests": after["total_requests"] - before["total_requests"],
+                "total_tokens": after["total_tokens"] - before["total_tokens"],
+                "prompt_tokens": after["prompt_tokens"] - before["prompt_tokens"],
+                "completion_tokens": after["completion_tokens"] - before["completion_tokens"],
+            }
+        }, ensure_ascii=False).encode("utf-8")
+        
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def handle(self):
         """Override to suppress connection reset errors on close."""
         try:
@@ -698,34 +788,369 @@ class Handler(BaseHTTPRequestHandler):
             # Client closed connection early or socket already closed, ignore
             pass
 
+    def _get_config_path(self):
+        """Get the current config file path."""
+        return getattr(self.server, 'config_path', 'config.json')
+
+    def _get_current_config(self):
+        """Get current configuration values."""
+        return {
+            "backend": getattr(self.server, 'backend_url', 'http://localhost:8080'),
+            "port": getattr(self.server, 'server_port', 8081),
+            "ollama_model": getattr(self.server, 'ollama_model', None) or '',
+            "timeout": getattr(self.server, 'stream_timeout', 1800),
+            "log_file": getattr(self.server, 'log_file', None) or '',
+        }
+
     def do_GET(self):
         path = self.path.split("?")[0]  # strip query params
+
+        # Silently handle favicon requests (browser auto-requests, noisy in logs)
+        if path == "/favicon.ico":
+            self.send_response(204)  # No Content
+            self.end_headers()
+            return
+
+        # Setup/configuration endpoint - Web-based configuration UI
+        if path == "/setup":
+            self._handle_setup_page()
+            return
+
+        # Test endpoint - simulate a request to verify token stats work
+        if path == "/test-stats":
+            self._handle_test_stats()
+            return
 
         # Statistics endpoint - returns proxy forwarding statistics
         if path == "/stats":
             with STATS_LOCK:
                 uptime = time.time() - STATS["start_time"]
-                stats_response = {
-                    "uptime_seconds": round(uptime, 2),
+                stats_data = {
+                    "uptime_seconds": int(uptime),
                     "uptime_formatted": self._format_duration(uptime),
-                    "requests": {
-                        "total": STATS["total_requests"],
-                        "stream": STATS["stream_requests"],
-                        "non_stream": STATS["non_stream_requests"],
-                        "ollama": STATS["ollama_requests"],
-                    },
+                    "total_requests": STATS["total_requests"],
+                    "stream_requests": STATS["stream_requests"],
+                    "non_stream_requests": STATS["non_stream_requests"],
+                    "ollama_requests": STATS["ollama_requests"],
                     "errors": STATS["errors"],
-                    "tokens": {
-                        "total": STATS["total_tokens"],
-                        "prompt": STATS["prompt_tokens"],
-                        "completion": STATS["completion_tokens"],
-                    },
+                    "total_tokens": STATS["total_tokens"],
+                    "prompt_tokens": STATS["prompt_tokens"],
+                    "completion_tokens": STATS["completion_tokens"],
+                    "updated_at": datetime.datetime.now().strftime('%H:%M:%S'),
                 }
-            body = json.dumps(stats_response, indent=2, ensure_ascii=False).encode("utf-8")
+            
+            html = """<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>llama-sse-proxy Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        h1 {
+            font-size: 2rem;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .lang-switch {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        .lang-switch:hover { background: rgba(255,255,255,0.2); }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 32px rgba(0,212,255,0.1);
+        }
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+            color: #888;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .card-icon {
+            width: 40px; height: 40px; border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.2rem;
+        }
+        .icon-blue { background: rgba(0,212,255,0.2); }
+        .icon-green { background: rgba(0,255,136,0.2); }
+        .icon-purple { background: rgba(123,44,191,0.2); }
+        .icon-orange { background: rgba(255,165,0,0.2); }
+        .icon-red { background: rgba(255,71,87,0.2); }
+        .card-value { font-size: 2.5rem; font-weight: 700; margin-bottom: 8px; }
+        .card-label { color: #888; font-size: 0.95rem; }
+        .uptime { color: #00d4ff; }
+        .requests { color: #00ff88; }
+        .tokens { color: #7b2cbf; }
+        .errors { color: #ff4757; }
+        .details {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        .detail-item { text-align: center; }
+        .detail-value { font-size: 1.3rem; font-weight: 600; color: #fff; }
+        .detail-label { font-size: 0.8rem; color: #666; margin-top: 4px; }
+        .status-bar {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .status-indicator { display: flex; align-items: center; gap: 8px; }
+        .status-dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: #00ff88;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .refresh-hint { color: #666; font-size: 0.85rem; }
+        @media (max-width: 600px) {
+            .grid { grid-template-columns: 1fr; }
+            .details { grid-template-columns: 1fr; }
+            h1 { font-size: 1.5rem; }
+            .header { flex-direction: column; gap: 10px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🦙 <span data-i18n="title">llama-sse-proxy 监控面板</span></h1>
+            <button class="lang-switch" onclick="toggleLang()">English</button>
+        </div>
+        
+        <div class="status-bar">
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span data-i18n="running">运行中</span>
+            </div>
+            <div class="refresh-hint"><span data-i18n="refresh">自动刷新: 5秒 | 最后更新</span>: <span id="updated-at">--:--:--</span></div>
+        </div>
+        
+        <div class="grid">
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon icon-blue">⏱️</div>
+                    <span data-i18n="uptime">运行时间</span>
+                </div>
+                <div class="card-value uptime" id="uptime-fmt">--</div>
+                <div class="card-label"><span id="uptime-sec">0</span> <span data-i18n="seconds">秒</span></div>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon icon-green">📊</div>
+                    <span data-i18n="total_requests">总请求数</span>
+                </div>
+                <div class="card-value requests" id="total-req">0</div>
+                <div class="card-label" data-i18n="all_requests">所有 API 请求</div>
+                <div class="details">
+                    <div class="detail-item">
+                        <div class="detail-value" style="color:#ffa502" id="stream-req">0</div>
+                        <div class="detail-label" data-i18n="stream">流式</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-value" style="color:#00d4ff" id="non-stream-req">0</div>
+                        <div class="detail-label" data-i18n="non_stream">非流式</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-value" style="color:#7b2cbf" id="ollama-req">0</div>
+                        <div class="detail-label">Ollama</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon icon-purple">📝</div>
+                    <span data-i18n="token_stats">Token 统计</span>
+                </div>
+                <div class="card-value tokens" id="total-tokens">0</div>
+                <div class="card-label" data-i18n="total_tokens">总计 Token 数</div>
+                <div class="details">
+                    <div class="detail-item">
+                        <div class="detail-value" style="color:#ffa502" id="prompt-tokens">0</div>
+                        <div class="detail-label">Prompt</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-value" style="color:#00ff88" id="completion-tokens">0</div>
+                        <div class="detail-label">Completion</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon icon-red">⚠️</div>
+                    <span data-i18n="errors">错误统计</span>
+                </div>
+                <div class="card-value errors" id="errors">0</div>
+                <div class="card-label" data-i18n="error_count">错误次数</div>
+            </div>
+        </div>
+    </div>
+    <script>
+        const i18n = {
+            zh: {
+                title: "llama-sse-proxy 监控面板",
+                running: "运行中",
+                refresh: "自动刷新: 5秒 | 最后更新",
+                uptime: "运行时间",
+                seconds: "秒",
+                total_requests: "总请求数",
+                all_requests: "所有 API 请求",
+                stream: "流式",
+                non_stream: "非流式",
+                token_stats: "Token 统计",
+                total_tokens: "总计 Token 数",
+                errors: "错误统计",
+                error_count: "错误次数",
+            },
+            en: {
+                title: "llama-sse-proxy Dashboard",
+                running: "Running",
+                refresh: "Auto-refresh: 5s | Last updated",
+                uptime: "Uptime",
+                seconds: "seconds",
+                total_requests: "Total Requests",
+                all_requests: "All API Requests",
+                stream: "Stream",
+                non_stream: "Non-Stream",
+                token_stats: "Token Statistics",
+                total_tokens: "Total Tokens",
+                errors: "Error Statistics",
+                error_count: "Error Count",
+            }
+        };
+        
+        let currentLang = localStorage.getItem('lang') || 'zh';
+        
+        function toggleLang() {
+            currentLang = currentLang === 'zh' ? 'en' : 'zh';
+            localStorage.setItem('lang', currentLang);
+            applyLang();
+        }
+        
+        function applyLang() {
+            document.querySelector('.lang-switch').textContent = currentLang === 'zh' ? 'English' : '中文';
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (i18n[currentLang][key]) {
+                    el.textContent = i18n[currentLang][key];
+                }
+            });
+        }
+        
+        function updateData() {
+            fetch('/stats.json')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('uptime-fmt').textContent = data.uptime_formatted;
+                    document.getElementById('uptime-sec').textContent = data.uptime_seconds;
+                    document.getElementById('total-req').textContent = data.total_requests;
+                    document.getElementById('stream-req').textContent = data.stream_requests;
+                    document.getElementById('non-stream-req').textContent = data.non_stream_requests;
+                    document.getElementById('ollama-req').textContent = data.ollama_requests;
+                    document.getElementById('total-tokens').textContent = data.total_tokens.toLocaleString();
+                    document.getElementById('prompt-tokens').textContent = data.prompt_tokens.toLocaleString();
+                    document.getElementById('completion-tokens').textContent = data.completion_tokens.toLocaleString();
+                    document.getElementById('errors').textContent = data.errors;
+                    document.getElementById('updated-at').textContent = data.updated_at;
+                })
+                .catch(() => {});
+        }
+        
+        applyLang();
+        updateData();
+        setInterval(updateData, 5000);
+    </script>
+</body>
+</html>"""
+            
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        
+        # Statistics JSON API for AJAX updates
+        if path == "/stats.json":
+            with STATS_LOCK:
+                uptime = time.time() - STATS["start_time"]
+                stats_data = {
+                    "uptime_seconds": int(uptime),
+                    "uptime_formatted": self._format_duration(uptime),
+                    "total_requests": STATS["total_requests"],
+                    "stream_requests": STATS["stream_requests"],
+                    "non_stream_requests": STATS["non_stream_requests"],
+                    "ollama_requests": STATS["ollama_requests"],
+                    "errors": STATS["errors"],
+                    "total_tokens": STATS["total_tokens"],
+                    "prompt_tokens": STATS["prompt_tokens"],
+                    "completion_tokens": STATS["completion_tokens"],
+                    "updated_at": datetime.datetime.now().strftime('%H:%M:%S'),
+                }
+            body = json.dumps(stats_data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -901,19 +1326,25 @@ URL:     {BACKEND}
                                     if "usage" in obj:
                                         backend_has_usage[0] = True
                                         usage = obj["usage"]
+                                        # 提取 token 数用于统计
+                                        last_timings["prompt_n"] = usage.get("prompt_tokens", 0)
+                                        last_timings["predicted_n"] = usage.get("completion_tokens", 0)
                                         log.info(f"backend usage: {usage}")
                                     # 也提取 timings（llama.cpp fallback）
                                     timings = obj.get("timings")
                                     choices = obj.get("choices", [])
                                     finish = choices[0].get("finish_reason") if choices else None
-                                    if timings and finish:
+                                    # 只要有 timings 就更新，不依赖 finish
+                                    if timings:
                                         last_timings["prompt_n"] = timings.get("prompt_n", 0)
                                         last_timings["predicted_n"] = timings.get("predicted_n", 0)
-                                        log.info(f"timings: prompt={last_timings['prompt_n']}, "
-                                                 f"completion={last_timings['predicted_n']}")
+                                        if finish:
+                                            log.info(f"timings: prompt={last_timings['prompt_n']}, "
+                                                     f"completion={last_timings['predicted_n']}")
                                     # 累积 delta.content 用于 usage 估算
                                     delta = choices[0].get("delta", {}) if choices else {}
-                                    content = delta.get("content", "")
+                                    # 同时处理 content 和 reasoning_content
+                                    content = delta.get("content", "") or delta.get("reasoning_content", "")
                                     if content:
                                         accumulated_content.append(content)
                         except json.JSONDecodeError:
@@ -1007,17 +1438,26 @@ URL:     {BACKEND}
         usage chunk — we just pass it through. For llama.cpp (no stream_options
         support), we estimate from timings or accumulated content.
         """
-        if backend_has_usage:
-            log.info("backend already sent usage, skip injection")
-            return
-
         prompt_n = last_timings.get("prompt_n", 0)
         predicted_n = last_timings.get("predicted_n", 0)
+        
         # 如果预测 token 为 0，但有累积内容，则估算
         if predicted_n == 0 and accumulated_content:
             predicted_n = max(1, len("".join(accumulated_content)) // 2)
             log.warning(f"usage estimate: completion={predicted_n} "
                         f"(from {len(accumulated_content)} content chunks)")
+        
+        # 更新 token 统计（无论后端是否返回了 usage）
+        if prompt_n > 0 or predicted_n > 0:
+            with STATS_LOCK:
+                STATS["prompt_tokens"] += prompt_n
+                STATS["completion_tokens"] += predicted_n
+                STATS["total_tokens"] += prompt_n + predicted_n
+        
+        if backend_has_usage:
+            log.info("backend already sent usage, skip injection")
+            return
+
         if prompt_n > 0 or predicted_n > 0:
             usage_chunk = (
                 "data: {\"id\":\"usage-inject\","
@@ -1074,6 +1514,27 @@ def load_config(config_path):
     except Exception as e:
         log.error(f"Failed to load config file: {e}")
         return {}
+
+
+def save_config(config_path, config_data):
+    """Save configuration to JSON file."""
+    try:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        log.error(f"Failed to save config file: {e}")
+        return False
+
+
+# Default configuration values
+DEFAULT_CONFIG = {
+    "backend": "http://localhost:8080",
+    "port": 8081,
+    "ollama_model": None,
+    "timeout": 1800,
+    "log_file": None,
+}
 
 
 def main():

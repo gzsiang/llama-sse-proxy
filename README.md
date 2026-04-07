@@ -85,10 +85,10 @@ OpenClaw 的上下文管理机制依赖流式响应中的 `usage` 字段：
 
 代理启动后，访问 `http://localhost:8081/stats` 查看实时统计：
 
-![Dashboard](docs/images/dashboard.png)
+![Dashboard](docs/images/dashboard.jpg)
 
 - **双语支持**：点击右上角切换中文/English
-- **实时刷新**：数据每 5 秒自动更新，无闪烁
+- **实时刷新**：数据每 5 秒自动更新
 - **运行状态**：显示运行时间、请求统计、Token 用量、错误计数
 
 ### 开机启动
@@ -265,10 +265,10 @@ Double-click `start.bat` (or `./start.sh` on Linux/macOS).
 
 Once the proxy is running, visit `http://localhost:8081/stats` for real-time statistics:
 
-![Dashboard](docs/images/dashboard.png)
+![Dashboard](docs/images/dashboard.jpg)
 
 - **Bilingual**: Click top-right to switch between Chinese/English
-- **Live refresh**: Data updates every 5 seconds without page flicker
+- **Live refresh**: Data updates every 5 seconds
 - **Runtime stats**: Uptime, request counts, token usage, error tracking
 
 ### Auto-start on Login
