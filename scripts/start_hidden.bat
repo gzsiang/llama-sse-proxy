@@ -7,7 +7,7 @@ if exist "%~dp0config.bat" call "%~dp0config.bat"
 
 :: Default values
 if not defined PYTHON set "PYTHON=python"
-if not defined SCRIPT set "SCRIPT=%~dp0llama_sse_proxy.py"
+if not defined SCRIPT set "SCRIPT=%~dp0..\llama_sse_proxy.py"
 if not defined BACKEND set "BACKEND=http://localhost:8080"
 if not defined PORT set "PORT=8081"
 if not defined LOG set "LOG=%~dp0proxy.log"

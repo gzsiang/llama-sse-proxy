@@ -1021,11 +1021,11 @@ class Handler(BaseHTTPRequestHandler):
                 <div class="details">
                     <div class="detail-item">
                         <div class="detail-value" style="color:#ffa502" id="prompt-tokens">0</div>
-                        <div class="detail-label">Prompt</div>
+                        <div class="detail-label" data-i18n="prompt">Prompt</div>
                     </div>
                     <div class="detail-item">
                         <div class="detail-value" style="color:#00ff88" id="completion-tokens">0</div>
-                        <div class="detail-label">Completion</div>
+                        <div class="detail-label" data-i18n="completion">Completion</div>
                     </div>
                 </div>
             </div>
@@ -1052,8 +1052,11 @@ class Handler(BaseHTTPRequestHandler):
                 all_requests: "所有 API 请求",
                 stream: "流式",
                 non_stream: "非流式",
-                token_stats: "Token 统计",
+                ollama: "Ollama",
+                token_stats: "TOKEN 统计",
                 total_tokens: "总计 Token 数",
+                prompt: "输入",
+                completion: "输出",
                 errors: "错误统计",
                 error_count: "错误次数",
             },
@@ -1067,8 +1070,11 @@ class Handler(BaseHTTPRequestHandler):
                 all_requests: "All API Requests",
                 stream: "Stream",
                 non_stream: "Non-Stream",
-                token_stats: "Token Statistics",
+                ollama: "Ollama",
+                token_stats: "TOKEN STATISTICS",
                 total_tokens: "Total Tokens",
+                prompt: "Prompt",
+                completion: "Completion",
                 errors: "Error Statistics",
                 error_count: "Error Count",
             }

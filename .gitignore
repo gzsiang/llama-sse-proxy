@@ -1,0 +1,19 @@
+# Test files (local only)
+tests/
+
+# Logs
+*.log
+proxy.log
+proxy.err
+
+# Local config (may contain sensitive data)
+config.bat
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
