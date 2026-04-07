@@ -1,0 +1,34 @@
+[
+  {
+    "session_id": "20260407_201921",
+    "start_time": "2026-04-07 20:19:21",
+    "end_time": "2026-04-07 20:30:24",
+    "duration_seconds": 662,
+    "total_tokens": 29446,
+    "prompt_tokens": 28483,
+    "completion_tokens": 963,
+    "total_requests": 3,
+    "finalized": true
+  },
+  {
+    "session_id": "20260407_204143",
+    "start_time": "2026-04-07 20:41:43",
+    "end_time": "2026-04-07 21:13:44",
+    "duration_seconds": 1920,
+    "total_tokens": 28645,
+    "prompt_tokens": 27973,
+    "completion_tokens": 672,
+    "total_requests": 3
+  },
+  {
+    "session_id": "20260407_212842",
+    "start_time": "2026-04-07 21:28:42",
+    "end_time": "2026-04-08 01:32:17",
+    "duration_seconds": 14615,
+    "total_tokens": 68370,
+    "prompt_tokens": 65601,
+    "completion_tokens": 2769,
+    "total_requests": 20,
+    "finalized": true
+  }
+]

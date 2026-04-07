@@ -1,7 +1,7 @@
 """
 llama-sse-proxy: Ensure usage field in SSE streams for AI agent frameworks
-Version: 0.2.2 (2026-04-07)
-Verified: ✅ History cleanup - filter zero-request sessions, i18n fix for backend/model labels
+Version: 0.2.4 (2026-04-08)
+Verified: ✅ History in subfolder, backend connection status with visual indicator
 
 Original: llama.cpp's SSE streaming responses lack the `usage` field that AI
 agent frameworks (OpenClaw, etc.) need to track token usage and trigger context
@@ -82,14 +82,34 @@ def setup_logging(log_file=None):
     )
 
 
-def init_history_file(config_path=None):
-    """Initialize history file path based on config location or working directory."""
-    global HISTORY_FILE
+def get_history_dir(config_path=None):
+    """Get history directory based on config location or working directory.
+    History files are stored in a 'history' subdirectory.
+    """
     if config_path:
         base_dir = Path(config_path).parent
     else:
         base_dir = Path.cwd()
-    HISTORY_FILE = base_dir / "proxy_history.json"
+    history_dir = base_dir / "history"
+    # Ensure history directory exists
+    history_dir.mkdir(parents=True, exist_ok=True)
+    return history_dir
+
+
+def get_history_file_for_month(year_month=None, config_path=None):
+    """Get history file path for a specific month (format: YYYY-MM).
+    If year_month is None, use current month.
+    """
+    base_dir = get_history_dir(config_path)
+    if year_month is None:
+        year_month = datetime.datetime.now().strftime("%Y-%m")
+    return base_dir / f"proxy_history_{year_month}.json"
+
+
+def init_history_file(config_path=None):
+    """Initialize history file path for current month."""
+    global HISTORY_FILE
+    HISTORY_FILE = get_history_file_for_month(None, config_path)
     return HISTORY_FILE
 
 
@@ -97,48 +117,91 @@ def init_history_file(config_path=None):
 BACKEND_MODEL_NAME = None
 
 def fetch_backend_model(backend_url):
-    """Fetch model name from backend /v1/models or /models endpoint."""
+    """Fetch model name from backend /v1/models or /models endpoint.
+    Returns model name, "unknown" (if connected but no model), or "disconnected" (if connection failed).
+    """
     global BACKEND_MODEL_NAME
     if BACKEND_MODEL_NAME:
         return BACKEND_MODEL_NAME
+    
+    connected = False
     
     # Try OpenAI-compatible /v1/models
     try:
         req = urllib.request.Request(urljoin(backend_url, "/v1/models"))
         req.add_header("Accept", "application/json")
         with urllib.request.urlopen(req, timeout=5) as resp:
+            connected = True
             data = json.loads(resp.read().decode("utf-8"))
             if data.get("data") and len(data["data"]) > 0:
                 BACKEND_MODEL_NAME = data["data"][0].get("id", "unknown")
                 return BACKEND_MODEL_NAME
+    except urllib.error.URLError:
+        pass  # Connection failed
     except Exception:
-        pass
+        connected = True  # Connected but other error
     
     # Try llama.cpp /models endpoint
     try:
         req = urllib.request.Request(urljoin(backend_url, "/models"))
         req.add_header("Accept", "application/json")
         with urllib.request.urlopen(req, timeout=5) as resp:
+            connected = True
             data = json.loads(resp.read().decode("utf-8"))
             if isinstance(data, list) and len(data) > 0:
                 BACKEND_MODEL_NAME = data[0].get("id", "unknown")
                 return BACKEND_MODEL_NAME
+    except urllib.error.URLError:
+        pass  # Connection failed
     except Exception:
-        pass
+        connected = True  # Connected but other error
     
-    BACKEND_MODEL_NAME = "unknown"
+    # If we never connected, return disconnected
+    if not connected:
+        BACKEND_MODEL_NAME = "disconnected"
+    else:
+        BACKEND_MODEL_NAME = "unknown"
     return BACKEND_MODEL_NAME
 
 
-def load_history():
-    """Load history from file."""
-    if not HISTORY_FILE or not HISTORY_FILE.exists():
+def load_history(year_month=None):
+    """Load history from file for a specific month.
+    If year_month is None, load current month's history.
+    """
+    file_path = get_history_file_for_month(year_month) if year_month else HISTORY_FILE
+    if not file_path or not file_path.exists():
         return []
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return []
+
+
+def load_all_monthly_stats():
+    """Load stats for current month and previous month."""
+    now = datetime.datetime.now()
+    current_month = now.strftime("%Y-%m")
+    
+    # Calculate previous month
+    if now.month == 1:
+        prev_month = f"{now.year - 1}-12"
+    else:
+        prev_month = f"{now.year}-{now.month - 1:02d}"
+    
+    current_history = load_history(current_month)
+    prev_history = load_history(prev_month)
+    
+    # Calculate totals
+    current_tokens = sum(h.get("total_tokens", 0) for h in current_history)
+    prev_tokens = sum(h.get("total_tokens", 0) for h in prev_history)
+    
+    return {
+        "current_month": current_month,
+        "current_month_tokens": current_tokens,
+        "previous_month": prev_month if prev_history else None,
+        "previous_month_tokens": prev_tokens if prev_history else None,
+    }
 
 
 def save_history(history):
@@ -1171,6 +1234,46 @@ class Handler(BaseHTTPRequestHandler):
             color: #7b2cbf;
             font-weight: 600;
         }
+        .monthly-section {
+            margin-top: 30px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            padding: 24px;
+        }
+        .monthly-title {
+            font-size: 1.1rem;
+            color: #888;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .monthly-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+        .monthly-card {
+            background: rgba(0,0,0,0.2);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+        .monthly-label {
+            color: #666;
+            font-size: 0.9rem;
+            margin-bottom: 8px;
+        }
+        .monthly-value {
+            color: #00d4ff;
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .monthly-unit {
+            color: #888;
+            font-size: 0.8rem;
+        }
         @media (max-width: 600px) {
             .grid { grid-template-columns: 1fr; }
             .details { grid-template-columns: 1fr; }
@@ -1236,6 +1339,23 @@ class Handler(BaseHTTPRequestHandler):
             </div>
         </div>
         
+        <!-- 月度统计 -->
+        <div class="monthly-section" id="monthly-section">
+            <div class="monthly-title">📅 <span data-i18n="monthly_stats">月度统计</span></div>
+            <div class="monthly-grid">
+                <div class="monthly-card" id="current-month-card">
+                    <div class="monthly-label" id="current-month-label">本月</div>
+                    <div class="monthly-value" id="current-month-tokens">0</div>
+                    <div class="monthly-unit">Tokens</div>
+                </div>
+                <div class="monthly-card" id="prev-month-card" style="display:none">
+                    <div class="monthly-label" id="prev-month-label">上月</div>
+                    <div class="monthly-value" id="prev-month-tokens">0</div>
+                    <div class="monthly-unit">Tokens</div>
+                </div>
+            </div>
+        </div>
+        
         <!-- 历史记录 -->
         <div class="history-section">
             <div class="history-title">📜 <span data-i18n="history">历史记录</span> <span style="color:#666;font-size:0.85rem;">(<span data-i18n="last_10">最近10次</span>)</span></div>
@@ -1291,6 +1411,10 @@ class Handler(BaseHTTPRequestHandler):
                 tokens: "Token 数",
                 backend: "后端",
                 model: "模型",
+                monthly_stats: "月度统计",
+                current_month: "本月",
+                previous_month: "上月",
+                disconnected: "未连接",
             },
             en: {
                 title: "llama-sse-proxy Dashboard",
@@ -1317,6 +1441,10 @@ class Handler(BaseHTTPRequestHandler):
                 tokens: "Tokens",
                 backend: "Backend",
                 model: "Model",
+                monthly_stats: "Monthly Statistics",
+                current_month: "Current Month",
+                previous_month: "Previous Month",
+                disconnected: "Disconnected",
             }
         };
         
@@ -1360,12 +1488,35 @@ class Handler(BaseHTTPRequestHandler):
                     
                     // Update backend info
                     document.getElementById('backend-url').textContent = data.backend || '--';
-                    if (data.backend_model && data.backend_model !== 'unknown') {
+                    const modelEl = document.getElementById('ollama-model');
+                    if (data.backend_model && data.backend_model !== 'unknown' && data.backend_model !== 'disconnected') {
                         document.getElementById('ollama-info').style.display = 'inline';
-                        document.getElementById('ollama-model').textContent = data.backend_model;
+                        modelEl.textContent = data.backend_model;
+                        modelEl.style.color = '#00d4ff'; // 正常颜色
+                    } else if (data.backend_model === 'disconnected') {
+                        document.getElementById('ollama-info').style.display = 'inline';
+                        modelEl.textContent = i18n[currentLang]['disconnected'] || '未连接';
+                        modelEl.style.color = '#ff6b6b'; // 红色提示
                     } else if (data.ollama_model) {
                         document.getElementById('ollama-info').style.display = 'inline';
-                        document.getElementById('ollama-model').textContent = data.ollama_model;
+                        modelEl.textContent = data.ollama_model;
+                        modelEl.style.color = '#00d4ff'; // 正常颜色
+                    }
+                    
+                    // Update monthly stats
+                    if (data.monthly_stats) {
+                        const ms = data.monthly_stats;
+                        document.getElementById('current-month-tokens').textContent = (ms.current_month_tokens || 0).toLocaleString();
+                        document.getElementById('current-month-label').textContent = ms.current_month + ' ' + (i18n[currentLang].current_month || '本月');
+                        
+                        const prevCard = document.getElementById('prev-month-card');
+                        if (ms.previous_month && ms.previous_month_tokens !== null) {
+                            prevCard.style.display = 'block';
+                            document.getElementById('prev-month-tokens').textContent = (ms.previous_month_tokens || 0).toLocaleString();
+                            document.getElementById('prev-month-label').textContent = ms.previous_month + ' ' + (i18n[currentLang].previous_month || '上月');
+                        } else {
+                            prevCard.style.display = 'none';
+                        }
                     }
                     
                     // Update history table (filter out sessions with 0 requests)
@@ -1411,6 +1562,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/stats.json":
             with STATS_LOCK:
                 uptime = time.time() - STATS["start_time"]
+                monthly_stats = load_all_monthly_stats()
                 stats_data = {
                     "uptime_seconds": int(uptime),
                     "uptime_formatted": self._format_duration(uptime),
@@ -1427,6 +1579,7 @@ class Handler(BaseHTTPRequestHandler):
                     "backend_model": fetch_backend_model(BACKEND),
                     "ollama_model": OLLAMA_MODEL if OLLAMA_MODEL else None,
                     "history": load_history()[-10:],  # Last 10 sessions
+                    "monthly_stats": monthly_stats,  # Monthly token statistics
                 }
             body = json.dumps(stats_data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
