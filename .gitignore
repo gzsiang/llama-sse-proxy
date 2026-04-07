@@ -17,3 +17,7 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# History data (local runtime data)
+proxy_history*.json
+history/
