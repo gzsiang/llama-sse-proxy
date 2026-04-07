@@ -1,7 +1,7 @@
 """
 llama-sse-proxy: Ensure usage field in SSE streams for AI agent frameworks
-Version: 0.2.1 (2026-04-07)
-Verified: ✅ Token stats fix - reasoning_content support, timing extraction without finish dependency
+Version: 0.2.2 (2026-04-07)
+Verified: ✅ History cleanup - filter zero-request sessions, i18n fix for backend/model labels
 
 Original: llama.cpp's SSE streaming responses lack the `usage` field that AI
 agent frameworks (OpenClaw, etc.) need to track token usage and trigger context
@@ -65,6 +65,11 @@ STATS = {
 }
 STATS_LOCK = threading.Lock()
 
+# History tracking
+HISTORY_FILE = None  # Set during startup
+HISTORY_LOCK = threading.Lock()
+CURRENT_SESSION_ID = None
+
 
 def setup_logging(log_file=None):
     handlers = [logging.StreamHandler(sys.stdout)]
@@ -75,6 +80,145 @@ def setup_logging(log_file=None):
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=handlers,
     )
+
+
+def init_history_file(config_path=None):
+    """Initialize history file path based on config location or working directory."""
+    global HISTORY_FILE
+    if config_path:
+        base_dir = Path(config_path).parent
+    else:
+        base_dir = Path.cwd()
+    HISTORY_FILE = base_dir / "proxy_history.json"
+    return HISTORY_FILE
+
+
+# Cache for backend model name
+BACKEND_MODEL_NAME = None
+
+def fetch_backend_model(backend_url):
+    """Fetch model name from backend /v1/models or /models endpoint."""
+    global BACKEND_MODEL_NAME
+    if BACKEND_MODEL_NAME:
+        return BACKEND_MODEL_NAME
+    
+    # Try OpenAI-compatible /v1/models
+    try:
+        req = urllib.request.Request(urljoin(backend_url, "/v1/models"))
+        req.add_header("Accept", "application/json")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("data") and len(data["data"]) > 0:
+                BACKEND_MODEL_NAME = data["data"][0].get("id", "unknown")
+                return BACKEND_MODEL_NAME
+    except Exception:
+        pass
+    
+    # Try llama.cpp /models endpoint
+    try:
+        req = urllib.request.Request(urljoin(backend_url, "/models"))
+        req.add_header("Accept", "application/json")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, list) and len(data) > 0:
+                BACKEND_MODEL_NAME = data[0].get("id", "unknown")
+                return BACKEND_MODEL_NAME
+    except Exception:
+        pass
+    
+    BACKEND_MODEL_NAME = "unknown"
+    return BACKEND_MODEL_NAME
+
+
+def load_history():
+    """Load history from file."""
+    if not HISTORY_FILE or not HISTORY_FILE.exists():
+        return []
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def save_history(history):
+    """Save history to file."""
+    if not HISTORY_FILE:
+        return
+    try:
+        with HISTORY_LOCK:
+            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+    except IOError as e:
+        log.warning(f"Failed to save history: {e}")
+
+
+def start_new_session():
+    """Start a new session and return its ID."""
+    global CURRENT_SESSION_ID
+    CURRENT_SESSION_ID = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return CURRENT_SESSION_ID
+
+
+def update_current_session():
+    """Update current session in history with current stats."""
+    if not CURRENT_SESSION_ID:
+        return
+    
+    history = load_history()
+    
+    # Find or create current session
+    session = None
+    for h in history:
+        if h.get("session_id") == CURRENT_SESSION_ID:
+            session = h
+            break
+    
+    if session is None:
+        session = {
+            "session_id": CURRENT_SESSION_ID,
+            "start_time": datetime.datetime.fromtimestamp(STATS["start_time"]).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        history.append(session)
+    
+    # Update session data
+    session["end_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    session["duration_seconds"] = int(time.time() - STATS["start_time"])
+    session["total_tokens"] = STATS["total_tokens"]
+    session["prompt_tokens"] = STATS["prompt_tokens"]
+    session["completion_tokens"] = STATS["completion_tokens"]
+    session["total_requests"] = STATS["total_requests"]
+    
+    # Filter out sessions with 0 requests (useless records from debugging restarts)
+    history = [h for h in history if h.get("total_requests", 0) > 0]
+    
+    # Keep only last 50 sessions
+    history = history[-50:]
+    
+    save_history(history)
+
+
+def finalize_session():
+    """Finalize current session on shutdown."""
+    if not CURRENT_SESSION_ID:
+        return
+    
+    history = load_history()
+    for h in history:
+        if h.get("session_id") == CURRENT_SESSION_ID:
+            h["end_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            h["duration_seconds"] = int(time.time() - STATS["start_time"])
+            h["total_tokens"] = STATS["total_tokens"]
+            h["prompt_tokens"] = STATS["prompt_tokens"]
+            h["completion_tokens"] = STATS["completion_tokens"]
+            h["total_requests"] = STATS["total_requests"]
+            h["finalized"] = True
+            break
+    
+    # Filter out sessions with 0 requests (useless records from debugging restarts)
+    history = [h for h in history if h.get("total_requests", 0) > 0]
+    
+    save_history(history)
 
 
 def _build_req(url, method, body, headers):
@@ -967,6 +1111,66 @@ class Handler(BaseHTTPRequestHandler):
         }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .refresh-hint { color: #666; font-size: 0.85rem; }
+        .backend-info {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            color: #888;
+            font-size: 0.9rem;
+            white-space: nowrap;
+        }
+        .backend-info span {
+            display: inline;
+        }
+        .backend-label {
+            color: #666;
+        }
+        .backend-value {
+            color: #00d4ff;
+            font-weight: 500;
+        }
+        .history-section {
+            margin-top: 30px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            padding: 24px;
+        }
+        .history-title {
+            font-size: 1.1rem;
+            color: #888;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .history-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .history-table th,
+        .history-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .history-table th {
+            color: #666;
+            font-weight: 500;
+            font-size: 0.85rem;
+        }
+        .history-table td {
+            color: #ccc;
+        }
+        .history-table tr:last-child td {
+            border-bottom: none;
+        }
+        .history-table .current-session {
+            background: rgba(0,212,255,0.1);
+        }
+        .token-sum {
+            color: #7b2cbf;
+            font-weight: 600;
+        }
         @media (max-width: 600px) {
             .grid { grid-template-columns: 1fr; }
             .details { grid-template-columns: 1fr; }
@@ -986,6 +1190,10 @@ class Handler(BaseHTTPRequestHandler):
             <div class="status-indicator">
                 <div class="status-dot"></div>
                 <span data-i18n="running">运行中</span>
+            </div>
+            <div class="backend-info" id="backend-info">
+                <span><span data-i18n="backend">后端</span>: <span class="backend-value" id="backend-url">--</span></span>
+                <span id="ollama-info" style="display:none"><span data-i18n="model">模型</span>: <span class="backend-value" id="ollama-model">--</span></span>
             </div>
             <div class="refresh-hint"><span data-i18n="refresh">自动刷新: 5秒 | 最后更新</span>: <span id="updated-at">--:--:--</span></div>
         </div>
@@ -1027,6 +1235,24 @@ class Handler(BaseHTTPRequestHandler):
                 </div>
             </div>
         </div>
+        
+        <!-- 历史记录 -->
+        <div class="history-section">
+            <div class="history-title">📜 <span data-i18n="history">历史记录</span> <span style="color:#666;font-size:0.85rem;">(<span data-i18n="last_10">最近10次</span>)</span></div>
+            <table class="history-table" id="history-table">
+                <thead>
+                    <tr>
+                        <th data-i18n="start_time">启动时间</th>
+                        <th data-i18n="duration">运行时长</th>
+                        <th data-i18n="requests">请求数</th>
+                        <th data-i18n="tokens">Token 数</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body">
+                    <!-- Filled by JS -->
+                </tbody>
+            </table>
+        </div>
     </div>
     
     <!-- 错误统计卡片 - 默认隐藏在右侧，有错误时滑入 -->
@@ -1057,6 +1283,14 @@ class Handler(BaseHTTPRequestHandler):
                 completion: "输出",
                 errors: "错误统计",
                 error_count: "错误次数",
+                history: "历史记录",
+                last_10: "最近10次",
+                start_time: "启动时间",
+                duration: "运行时长",
+                requests: "请求数",
+                tokens: "Token 数",
+                backend: "后端",
+                model: "模型",
             },
             en: {
                 title: "llama-sse-proxy Dashboard",
@@ -1075,6 +1309,14 @@ class Handler(BaseHTTPRequestHandler):
                 completion: "Completion",
                 errors: "Error Statistics",
                 error_count: "Error Count",
+                history: "History",
+                last_10: "last 10",
+                start_time: "Start Time",
+                duration: "Duration",
+                requests: "Requests",
+                tokens: "Tokens",
+                backend: "Backend",
+                model: "Model",
             }
         };
         
@@ -1096,6 +1338,13 @@ class Handler(BaseHTTPRequestHandler):
             });
         }
         
+        function formatDuration(seconds) {
+            if (seconds < 60) return seconds + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+            if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';
+            return Math.floor(seconds / 86400) + 'd ' + Math.floor((seconds % 86400) / 3600) + 'h';
+        }
+        
         function updateData() {
             fetch('/stats.json')
                 .then(r => r.json())
@@ -1108,6 +1357,35 @@ class Handler(BaseHTTPRequestHandler):
                     document.getElementById('errors').textContent = data.errors;
                     document.getElementById('error-card').classList.toggle('show', data.errors > 0);
                     document.getElementById('updated-at').textContent = data.updated_at;
+                    
+                    // Update backend info
+                    document.getElementById('backend-url').textContent = data.backend || '--';
+                    if (data.backend_model && data.backend_model !== 'unknown') {
+                        document.getElementById('ollama-info').style.display = 'inline';
+                        document.getElementById('ollama-model').textContent = data.backend_model;
+                    } else if (data.ollama_model) {
+                        document.getElementById('ollama-info').style.display = 'inline';
+                        document.getElementById('ollama-model').textContent = data.ollama_model;
+                    }
+                    
+                    // Update history table (filter out sessions with 0 requests)
+                    const tbody = document.getElementById('history-body');
+                    tbody.innerHTML = '';
+                    if (data.history && data.history.length > 0) {
+                        data.history.slice().reverse().forEach(session => {
+                            // Skip sessions with 0 requests (useless records from debugging restarts)
+                            if ((session.total_requests || 0) === 0) return;
+                            const row = document.createElement('tr');
+                            if (!session.finalized) row.classList.add('current-session');
+                            row.innerHTML = `
+                                <td>${session.start_time || '--'}</td>
+                                <td>${formatDuration(session.duration_seconds || 0)}</td>
+                                <td>${session.total_requests || 0}</td>
+                                <td class="token-sum">${(session.total_tokens || 0).toLocaleString()}</td>
+                            `;
+                            tbody.appendChild(row);
+                        });
+                    }
                 })
                 .catch(() => {});
         }
@@ -1145,6 +1423,10 @@ class Handler(BaseHTTPRequestHandler):
                     "prompt_tokens": STATS["prompt_tokens"],
                     "completion_tokens": STATS["completion_tokens"],
                     "updated_at": datetime.datetime.now().strftime('%H:%M:%S'),
+                    "backend": BACKEND,
+                    "backend_model": fetch_backend_model(BACKEND),
+                    "ollama_model": OLLAMA_MODEL if OLLAMA_MODEL else None,
+                    "history": load_history()[-10:],  # Last 10 sessions
                 }
             body = json.dumps(stats_data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -1590,8 +1872,22 @@ def main():
     global SHUTDOWN_EVENT
     SHUTDOWN_EVENT = threading.Event()
 
+    # Initialize history tracking
+    init_history_file(args.config)
+    start_new_session()
+    
+    # Start periodic history save thread
+    def history_saver():
+        while not SHUTDOWN_EVENT.is_set():
+            time.sleep(60)  # Save every minute
+            update_current_session()
+    
+    history_thread = threading.Thread(target=history_saver, daemon=True)
+    history_thread.start()
+
     def shutdown(sig, frame):
         log.info("Shutting down...")
+        finalize_session()
         SHUTDOWN_EVENT.set()
 
     signal.signal(signal.SIGINT, shutdown)
