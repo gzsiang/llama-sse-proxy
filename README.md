@@ -75,11 +75,32 @@ OpenClaw 的上下文管理机制依赖流式响应中的 `usage` 字段：
 >
 > 回退命令：`npm install -g openclaw@2026.3.31`
 
+### 项目结构
+
+```
+llama-sse-proxy/
+├── start.bat              # 正常启动（带窗口，推荐日常使用）
+├── config.json            # 配置文件
+├── llama_sse_proxy.py     # 主程序
+├── scripts/               # 高级启动脚本
+│   ├── start_hidden.bat   # 隐藏窗口后台启动
+│   ├── start_proxy.bat    # 最小化窗口启动
+│   ├── start_proxy.ps1    # 任务计划启动（需管理员）
+│   ├── register_task.ps1  # 注册开机启动任务
+│   ├── unregister_task.ps1# 取消开机启动任务
+│   └── config.bat.example # Windows 批处理配置模板
+└── docs/                  # 文档和截图
+```
+
 ### 快速启动
 
-双击 `start.bat` 即可运行（或 `./start.sh`）。
+双击 `start.bat` 即可运行（或 `./start.sh` on Linux/macOS）。
 
-> ⚠️ 首次使用前，先复制 `config.bat.example` 为 `config.bat`，填入你的 Python 路径、后端地址等。
+这是最简单的启动方式，会显示一个控制台窗口，方便查看日志和调试信息。
+
+> ⚠️ 首次使用前：
+> - 如需使用批处理启动脚本，复制 `scripts/config.bat.example` 为 `scripts/config.bat`，填入你的 Python 路径、后端地址等
+> - 或直接编辑 `config.json` 使用 JSON 配置
 
 ### Web 监控面板
 
@@ -91,14 +112,26 @@ OpenClaw 的上下文管理机制依赖流式响应中的 `usage` 字段：
 - **实时刷新**：数据每 5 秒自动更新
 - **运行状态**：显示运行时间、请求统计、Token 用量、错误计数
 
+### 启动方式对比
+
+| 方式 | 命令 | 特点 |
+|---|---|---|
+| **正常启动** | `start.bat` | 带控制台窗口，方便查看日志 |
+| **隐藏启动** | `scripts/start_hidden.bat` | 完全隐藏窗口，后台运行 |
+| **最小化启动** | `scripts/start_proxy.bat` | 最小化到任务栏 |
+| **任务计划** | `scripts/start_proxy.ps1` | 以 Windows 服务方式运行 |
+
 ### 开机启动
 
 **Windows（用户级，无需管理员）：**
 ```powershell
-# 首次：先配置 config.bat
-.\setup_startup.ps1   # 注册开机启动
+# 首次：先配置 scripts/config.bat
+cd scripts
+.\setup_startup.ps1   # 注册开机启动（在根目录运行）
 .\unregister_task.ps1 # 取消开机启动
 ```
+
+> 注意：`setup_startup.ps1` 在根目录，启动脚本在 `scripts/` 目录。
 
 注册后每次登录自动后台启动，窗口完全隐藏。
 
@@ -255,11 +288,32 @@ This proxy solves the problem through:
 >
 > Rollback: `npm install -g openclaw@2026.3.31`
 
+### Project Structure
+
+```
+llama-sse-proxy/
+├── start.bat              # Normal start (with console window, recommended)
+├── config.json            # Configuration file
+├── llama_sse_proxy.py     # Main program
+├── scripts/               # Advanced launch scripts
+│   ├── start_hidden.bat   # Hidden window (background)
+│   ├── start_proxy.bat    # Minimized window
+│   ├── start_proxy.ps1    # Task Scheduler (requires admin)
+│   ├── register_task.ps1  # Register auto-start task
+│   ├── unregister_task.ps1# Remove auto-start task
+│   └── config.bat.example # Windows batch config template
+└── docs/                  # Documentation and screenshots
+```
+
 ### Quick Start
 
 Double-click `start.bat` (or `./start.sh` on Linux/macOS).
 
-> ⚠️ Before first use: copy `config.bat.example` to `config.bat` and fill in your Python path, backend URL, etc.
+This is the simplest way to start, with a console window for easy log viewing and debugging.
+
+> ⚠️ Before first use:
+> - For batch scripts: copy `scripts/config.bat.example` to `scripts/config.bat` and fill in your Python path, backend URL, etc.
+> - Or edit `config.json` directly for JSON configuration
 
 ### Web Dashboard
 
@@ -271,13 +325,26 @@ Once the proxy is running, visit `http://localhost:8081/stats` for real-time sta
 - **Live refresh**: Data updates every 5 seconds
 - **Runtime stats**: Uptime, request counts, token usage, error tracking
 
+### Launch Options
+
+| Method | Command | Features |
+|---|---|---|
+| **Normal** | `start.bat` | Console window, easy log viewing |
+| **Hidden** | `scripts/start_hidden.bat` | Completely hidden, runs in background |
+| **Minimized** | `scripts/start_proxy.bat` | Minimized to taskbar |
+| **Task Scheduler** | `scripts/start_proxy.ps1` | Runs as Windows service |
+
 ### Auto-start on Login
 
 **Windows (user-level, no admin required):**
 ```powershell
-.\setup_startup.ps1   # Register auto-start
+# First: configure scripts/config.bat
+cd scripts
+.\setup_startup.ps1   # Register auto-start (run from root)
 .\unregister_task.ps1 # Remove auto-start
 ```
+
+> Note: `setup_startup.ps1` is in the root directory, launch scripts are in `scripts/`.
 
 After registration, the proxy starts in the background on every login, fully hidden.
 
