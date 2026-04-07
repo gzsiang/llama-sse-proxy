@@ -81,6 +81,16 @@ OpenClaw 的上下文管理机制依赖流式响应中的 `usage` 字段：
 
 > ⚠️ 首次使用前，先复制 `config.bat.example` 为 `config.bat`，填入你的 Python 路径、后端地址等。
 
+### Web 监控面板
+
+代理启动后，访问 `http://localhost:8081/stats` 查看实时统计：
+
+![Dashboard](docs/images/dashboard.png)
+
+- **双语支持**：点击右上角切换中文/English
+- **实时刷新**：数据每 5 秒自动更新，无闪烁
+- **运行状态**：显示运行时间、请求统计、Token 用量、错误计数
+
 ### 开机启动
 
 **Windows（用户级，无需管理员）：**
@@ -250,6 +260,16 @@ This proxy solves the problem through:
 Double-click `start.bat` (or `./start.sh` on Linux/macOS).
 
 > ⚠️ Before first use: copy `config.bat.example` to `config.bat` and fill in your Python path, backend URL, etc.
+
+### Web Dashboard
+
+Once the proxy is running, visit `http://localhost:8081/stats` for real-time statistics:
+
+![Dashboard](docs/images/dashboard.png)
+
+- **Bilingual**: Click top-right to switch between Chinese/English
+- **Live refresh**: Data updates every 5 seconds without page flicker
+- **Runtime stats**: Uptime, request counts, token usage, error tracking
 
 ### Auto-start on Login
 
