@@ -925,9 +925,21 @@ class Handler(BaseHTTPRequestHandler):
         .requests { color: #00ff88; }
         .tokens { color: #7b2cbf; }
         .errors { color: #ff4757; }
+        .error-card-fixed {
+            position: fixed;
+            right: -320px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 280px;
+            transition: right 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            z-index: 100;
+        }
+        .error-card-fixed.show {
+            right: 20px;
+        }
         .details {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(2, 1fr);
             gap: 16px;
             margin-top: 16px;
             padding-top: 16px;
@@ -985,7 +997,6 @@ class Handler(BaseHTTPRequestHandler):
                     <span data-i18n="uptime">运行时间</span>
                 </div>
                 <div class="card-value uptime" id="uptime-fmt">--</div>
-                <div class="card-label"><span id="uptime-sec">0</span> <span data-i18n="seconds">秒</span></div>
             </div>
             
             <div class="card">
@@ -995,20 +1006,6 @@ class Handler(BaseHTTPRequestHandler):
                 </div>
                 <div class="card-value requests" id="total-req">0</div>
                 <div class="card-label" data-i18n="all_requests">所有 API 请求</div>
-                <div class="details">
-                    <div class="detail-item">
-                        <div class="detail-value" style="color:#ffa502" id="stream-req">0</div>
-                        <div class="detail-label" data-i18n="stream">流式</div>
-                    </div>
-                    <div class="detail-item">
-                        <div class="detail-value" style="color:#00d4ff" id="non-stream-req">0</div>
-                        <div class="detail-label" data-i18n="non_stream">非流式</div>
-                    </div>
-                    <div class="detail-item">
-                        <div class="detail-value" style="color:#7b2cbf" id="ollama-req">0</div>
-                        <div class="detail-label">Ollama</div>
-                    </div>
-                </div>
             </div>
             
             <div class="card">
@@ -1029,16 +1026,17 @@ class Handler(BaseHTTPRequestHandler):
                     </div>
                 </div>
             </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon icon-red">⚠️</div>
-                    <span data-i18n="errors">错误统计</span>
-                </div>
-                <div class="card-value errors" id="errors">0</div>
-                <div class="card-label" data-i18n="error_count">错误次数</div>
-            </div>
         </div>
+    </div>
+    
+    <!-- 错误统计卡片 - 默认隐藏在右侧，有错误时滑入 -->
+    <div class="card error-card-fixed" id="error-card">
+        <div class="card-header">
+            <div class="card-icon icon-red">⚠️</div>
+            <span data-i18n="errors">错误统计</span>
+        </div>
+        <div class="card-value errors" id="errors">0</div>
+        <div class="card-label" data-i18n="error_count">错误次数</div>
     </div>
     <script>
         const i18n = {
@@ -1103,15 +1101,12 @@ class Handler(BaseHTTPRequestHandler):
                 .then(r => r.json())
                 .then(data => {
                     document.getElementById('uptime-fmt').textContent = data.uptime_formatted;
-                    document.getElementById('uptime-sec').textContent = data.uptime_seconds;
                     document.getElementById('total-req').textContent = data.total_requests;
-                    document.getElementById('stream-req').textContent = data.stream_requests;
-                    document.getElementById('non-stream-req').textContent = data.non_stream_requests;
-                    document.getElementById('ollama-req').textContent = data.ollama_requests;
                     document.getElementById('total-tokens').textContent = data.total_tokens.toLocaleString();
                     document.getElementById('prompt-tokens').textContent = data.prompt_tokens.toLocaleString();
                     document.getElementById('completion-tokens').textContent = data.completion_tokens.toLocaleString();
                     document.getElementById('errors').textContent = data.errors;
+                    document.getElementById('error-card').classList.toggle('show', data.errors > 0);
                     document.getElementById('updated-at').textContent = data.updated_at;
                 })
                 .catch(() => {});
