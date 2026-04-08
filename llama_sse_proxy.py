@@ -65,6 +65,8 @@ STATS = {
     "total_tokens": 0,
     "prompt_tokens": 0,
     "completion_tokens": 0,
+    "total_completion_time": 0.0,      # cumulative seconds spent generating
+    "completion_tokens_per_sec": 0.0,  # rolling average tokens/sec
 }
 STATS_LOCK = threading.Lock()
 
@@ -72,6 +74,28 @@ STATS_LOCK = threading.Lock()
 HISTORY_FILE = None  # Set during startup
 HISTORY_LOCK = threading.Lock()
 CURRENT_SESSION_ID = None
+
+# Per-request history for charts (last 50 requests)
+REQUEST_HISTORY = []
+REQUEST_HISTORY_LOCK = threading.Lock()
+
+
+def record_request_stats(prompt_n, completion_n, elapsed):
+    """Record a single request's stats for chart history."""
+    if completion_n == 0:
+        return
+    speed = completion_n / elapsed if elapsed > 0 else 0
+    with REQUEST_HISTORY_LOCK:
+        REQUEST_HISTORY.append({
+            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "total_tokens": prompt_n + completion_n,
+            "prompt_tokens": prompt_n,
+            "completion_tokens": completion_n,
+            "speed": round(speed, 1),
+        })
+        # Keep last 50 data points
+        if len(REQUEST_HISTORY) > 50:
+            del REQUEST_HISTORY[:-50]
 
 
 def setup_logging(log_file=None):
@@ -1049,7 +1073,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Statistics endpoint - returns proxy forwarding statistics
-        if path == "/stats":
+        # Supports /stats, /stats/zh, /stats/en, /zh, /en
+        url_lang = None
+        if path in ("/zh", "/en"):
+            url_lang = path[1:]
+        elif path.startswith("/stats/"):
+            seg = path.rsplit("/", 1)[-1]
+            if seg in ("zh", "en"):
+                url_lang = seg
+
+        if path in ("/stats", "/zh", "/en") or path.startswith("/stats/"):
             with STATS_LOCK:
                 uptime = time.time() - STATS["start_time"]
                 stats_data = {
@@ -1063,6 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
                     "total_tokens": STATS["total_tokens"],
                     "prompt_tokens": STATS["prompt_tokens"],
                     "completion_tokens": STATS["completion_tokens"],
+                    "completion_tokens_per_sec": STATS["completion_tokens_per_sec"],
                     "updated_at": datetime.datetime.now().strftime('%H:%M:%S'),
                 }
             
@@ -1145,9 +1179,11 @@ class Handler(BaseHTTPRequestHandler):
         .icon-green { background: rgba(0,255,136,0.2); }
         .icon-purple { background: rgba(123,44,191,0.2); }
         .icon-orange { background: rgba(255,165,0,0.2); }
-        .icon-red { background: rgba(255,71,87,0.2); }
+        .icon-yellow { background: rgba(255,165,0,0.2); }
         .card-value { font-size: 2.5rem; font-weight: 700; margin-bottom: 8px; }
         .card-label { color: #888; font-size: 0.95rem; }
+        .card-sub { color: #888; font-size: 1rem; margin-top: 4px; }
+        .card-sub-value { color: #00ff88; font-weight: 600; font-size: 1.1rem; }
         .uptime { color: #00d4ff; }
         .requests { color: #00ff88; }
         .tokens { color: #7b2cbf; }
@@ -1294,6 +1330,41 @@ class Handler(BaseHTTPRequestHandler):
             color: #888;
             font-size: 0.8rem;
         }
+        .chart-section {
+            margin-top: 30px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            padding: 24px;
+        }
+        .chart-title {
+            font-size: 1.1rem;
+            color: #888;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+        .chart-container {
+            background: rgba(0,0,0,0.2);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .chart-label {
+            color: #666;
+            font-size: 0.85rem;
+            margin-bottom: 12px;
+            text-align: center;
+        }
+        .chart-canvas {
+            width: 100% !important;
+            height: 180px !important;
+        }
         @media (max-width: 600px) {
             .grid { grid-template-columns: 1fr; }
             .details { grid-template-columns: 1fr; }
@@ -1301,6 +1372,8 @@ class Handler(BaseHTTPRequestHandler):
             .header { flex-direction: column; gap: 10px; }
         }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>window.__URL_LANG__ = __URL_LANG__;</script>
 </head>
 <body>
     <div class="container">
@@ -1328,15 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
                     <span data-i18n="uptime">运行时间</span>
                 </div>
                 <div class="card-value uptime" id="uptime-fmt">--</div>
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <div class="card-icon icon-green">📊</div>
-                    <span data-i18n="total_requests">总请求数</span>
-                </div>
-                <div class="card-value requests" id="total-req">0</div>
-                <div class="card-label" data-i18n="all_requests">所有 API 请求</div>
+                <div class="card-sub"><span data-i18n="total_requests">总请求数</span>: <span class="card-sub-value" id="total-req">0</span></div>
             </div>
             
             <div class="card">
@@ -1357,6 +1422,15 @@ class Handler(BaseHTTPRequestHandler):
                     </div>
                 </div>
             </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon icon-yellow">⚡</div>
+                    <span data-i18n="gen_speed">生成速度</span>
+                </div>
+                <div class="card-value" style="color:#ffa502" id="completion-speed">--</div>
+                <div class="card-label" data-i18n="tokens_per_sec">tokens / 秒</div>
+            </div>
         </div>
         
         <!-- 月度统计 -->
@@ -1372,6 +1446,21 @@ class Handler(BaseHTTPRequestHandler):
                     <div class="monthly-label" id="prev-month-label">上月</div>
                     <div class="monthly-value" id="prev-month-tokens">0</div>
                     <div class="monthly-unit">Tokens</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 折线图 -->
+        <div class="chart-section">
+            <div class="chart-title">📈 <span data-i18n="chart_title">请求趋势</span></div>
+            <div class="chart-grid">
+                <div class="chart-container">
+                    <div class="chart-label" data-i18n="chart_tokens">每次请求 Token 数</div>
+                    <canvas id="tokensChart" class="chart-canvas"></canvas>
+                </div>
+                <div class="chart-container">
+                    <div class="chart-label" data-i18n="chart_speed">生成速度 (tokens/s)</div>
+                    <canvas id="speedChart" class="chart-canvas"></canvas>
                 </div>
             </div>
         </div>
@@ -1413,7 +1502,6 @@ class Handler(BaseHTTPRequestHandler):
                 uptime: "运行时间",
                 seconds: "秒",
                 total_requests: "总请求数",
-                all_requests: "所有 API 请求",
                 stream: "流式",
                 non_stream: "非流式",
                 ollama: "Ollama",
@@ -1421,6 +1509,8 @@ class Handler(BaseHTTPRequestHandler):
                 total_tokens: "总计 Token 数",
                 prompt: "输入",
                 completion: "输出",
+                gen_speed: "生成速度",
+                tokens_per_sec: "tokens / 秒",
                 errors: "错误统计",
                 error_count: "错误次数",
                 history: "历史记录",
@@ -1435,6 +1525,9 @@ class Handler(BaseHTTPRequestHandler):
                 current_month: "本月",
                 previous_month: "上月",
                 disconnected: "未连接",
+                chart_title: "请求趋势",
+                chart_tokens: "每次请求 Token 数",
+                chart_speed: "生成速度 (tokens/s)",
             },
             en: {
                 title: "llama-sse-proxy Dashboard",
@@ -1443,7 +1536,6 @@ class Handler(BaseHTTPRequestHandler):
                 uptime: "Uptime",
                 seconds: "seconds",
                 total_requests: "Total Requests",
-                all_requests: "All API Requests",
                 stream: "Stream",
                 non_stream: "Non-Stream",
                 ollama: "Ollama",
@@ -1451,6 +1543,8 @@ class Handler(BaseHTTPRequestHandler):
                 total_tokens: "Total Tokens",
                 prompt: "Prompt",
                 completion: "Completion",
+                gen_speed: "Generation Speed",
+                tokens_per_sec: "tokens / sec",
                 errors: "Error Statistics",
                 error_count: "Error Count",
                 history: "History",
@@ -1465,10 +1559,122 @@ class Handler(BaseHTTPRequestHandler):
                 current_month: "Current Month",
                 previous_month: "Previous Month",
                 disconnected: "Disconnected",
+                chart_title: "Request Trends",
+                chart_tokens: "Tokens per Request",
+                chart_speed: "Generation Speed (tokens/s)",
             }
         };
+
+        // Chart instances
+        let tokensChart, speedChart;
+
+        function initCharts() {
+            if (typeof Chart === 'undefined') {
+                console.error('Chart.js not loaded!');
+                return;
+            }
+            console.log('Chart.js loaded successfully');
+            const chartDefaults = {
+                animation: false,
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    x: {
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                        ticks: { color: '#666', font: { size: 10 }, maxTicksLimit: 8 }
+                    },
+                    y: {
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                        ticks: { color: '#666', font: { size: 10 } }
+                    }
+                }
+            };
+
+            tokensChart = new Chart(document.getElementById('tokensChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'Prompt',
+                            data: [],
+                            borderColor: '#ffa502',
+                            backgroundColor: 'rgba(255,165,2,0.1)',
+                            tension: 0.3,
+                            fill: true,
+                            pointRadius: 2,
+                            pointHoverRadius: 4,
+                        },
+                        {
+                            label: 'Completion',
+                            data: [],
+                            borderColor: '#00ff88',
+                            backgroundColor: 'rgba(0,255,136,0.1)',
+                            tension: 0.3,
+                            fill: true,
+                            pointRadius: 2,
+                            pointHoverRadius: 4,
+                        }
+                    ]
+                },
+                options: { ...chartDefaults }
+            });
+
+            speedChart = new Chart(document.getElementById('speedChart'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Speed',
+                        data: [],
+                        borderColor: '#00d4ff',
+                        backgroundColor: 'rgba(0,212,255,0.1)',
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 2,
+                        pointHoverRadius: 4,
+                    }]
+                },
+                options: { ...chartDefaults }
+            });
+        }
+
+        function updateCharts(history) {
+            if (!tokensChart || !speedChart) {
+                console.warn('Charts not initialized yet');
+                return;
+            }
+            if (!history || history.length === 0) {
+                tokensChart.data.labels = [];
+                tokensChart.data.datasets[0].data = [];
+                tokensChart.data.datasets[1].data = [];
+                speedChart.data.labels = [];
+                speedChart.data.datasets[0].data = [];
+                tokensChart.update('none');
+                speedChart.update('none');
+                return;
+            }
+            const labels = history.map(h => h.time);
+            const promptData = history.map(h => h.prompt_tokens);
+            const completionData = history.map(h => h.completion_tokens);
+            const speedData = history.map(h => h.speed);
+
+            tokensChart.data.labels = labels;
+            tokensChart.data.datasets[0].data = promptData;
+            tokensChart.data.datasets[1].data = completionData;
+            speedChart.data.labels = labels;
+            speedChart.data.datasets[0].data = speedData;
+
+            tokensChart.update('none');
+            speedChart.update('none');
+        }
         
-        let currentLang = localStorage.getItem('lang') || 'zh';
+        // URL param takes priority: /stats?zh, /stats?en, or /stats?lang=zh
+        const urlLang = __URL_LANG__;
+        let currentLang = urlLang || localStorage.getItem('lang') || 'zh';
         
         function toggleLang() {
             currentLang = currentLang === 'zh' ? 'en' : 'zh';
@@ -1502,6 +1708,10 @@ class Handler(BaseHTTPRequestHandler):
                     document.getElementById('total-tokens').textContent = data.total_tokens.toLocaleString();
                     document.getElementById('prompt-tokens').textContent = data.prompt_tokens.toLocaleString();
                     document.getElementById('completion-tokens').textContent = data.completion_tokens.toLocaleString();
+                    document.getElementById('completion-speed').textContent =
+                        data.completion_tokens_per_sec > 0
+                            ? data.completion_tokens_per_sec.toFixed(1) + ' /s'
+                            : '--';
                     document.getElementById('errors').textContent = data.errors;
                     document.getElementById('error-card').classList.toggle('show', data.errors > 0);
                     document.getElementById('updated-at').textContent = data.updated_at;
@@ -1557,17 +1767,25 @@ class Handler(BaseHTTPRequestHandler):
                             tbody.appendChild(row);
                         });
                     }
+
+                    // Update charts
+                    if (data.request_history) {
+                        updateCharts(data.request_history);
+                    }
                 })
                 .catch(() => {});
         }
-        
+
         applyLang();
+        initCharts();
         updateData();
         setInterval(updateData, 5000);
     </script>
 </body>
 </html>"""
             
+            lang_js = repr(url_lang) if url_lang else "null"
+            html = html.replace("__URL_LANG__", lang_js)
             body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1594,6 +1812,7 @@ class Handler(BaseHTTPRequestHandler):
                     "total_tokens": STATS["total_tokens"],
                     "prompt_tokens": STATS["prompt_tokens"],
                     "completion_tokens": STATS["completion_tokens"],
+                    "completion_tokens_per_sec": STATS["completion_tokens_per_sec"],
                     "updated_at": datetime.datetime.now().strftime('%H:%M:%S'),
                     "backend": BACKEND,
                     "backend_model": fetch_backend_model(BACKEND),
@@ -1601,6 +1820,9 @@ class Handler(BaseHTTPRequestHandler):
                     "history": load_history()[-10:],  # Last 10 sessions
                     "monthly_stats": monthly_stats,  # Monthly token statistics
                 }
+            # 请求历史数据单独获取（不加锁）
+            with REQUEST_HISTORY_LOCK:
+                stats_data["request_history"] = list(REQUEST_HISTORY)
             body = json.dumps(stats_data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1754,6 +1976,8 @@ URL:     {BACKEND}
         accumulated_content = []  # 累积 delta.content，用于 usage 全零时估算
         backend_has_usage = [False]  # [0] = 后端是否已返回过 usage chunk
 
+        stream_start_time = time.time()  # 记录流开始时间，用于计算生成速度
+        
         # 立即开始向后端请求（stream=True，返回 queue）
         try:
             status, headers, data_queue = curl_request(
@@ -1786,7 +2010,8 @@ URL:     {BACKEND}
                     # fetch 线程结束（正常或出错）；注入 usage 并发 [DONE]
                     if not usage_injected:
                         self._inject_usage_if_needed(
-                            last_timings, accumulated_content, backend_has_usage[0]
+                            last_timings, accumulated_content, backend_has_usage[0],
+                            stream_start_time
                         )
                         usage_injected = True
                     self.wfile.write(b"data: [DONE]\n\n")
@@ -1840,7 +2065,8 @@ URL:     {BACKEND}
                 # 拦截 [DONE]，先注入 usage，再发 [DONE]
                 if not usage_injected and chunk.strip() == b"data: [DONE]":
                     self._inject_usage_if_needed(
-                        last_timings, accumulated_content, backend_has_usage[0]
+                        last_timings, accumulated_content, backend_has_usage[0],
+                        stream_start_time
                     )
                     usage_injected = True
                     self.wfile.write(b"data: [DONE]\n\n")
@@ -1869,7 +2095,7 @@ URL:     {BACKEND}
                 self.close_connection = True
                 break
 
-    def _inject_usage_if_needed(self, last_timings, accumulated_content, backend_has_usage):
+    def _inject_usage_if_needed(self, last_timings, accumulated_content, backend_has_usage, stream_start_time):
         """Inject usage chunk only if the backend didn't already provide one.
 
         LMStudio/Ollama with stream_options.include_usage=true will send their own
@@ -1887,10 +2113,20 @@ URL:     {BACKEND}
         
         # 更新 token 统计（无论后端是否返回了 usage）
         if prompt_n > 0 or predicted_n > 0:
+            elapsed = time.time() - stream_start_time
             with STATS_LOCK:
                 STATS["prompt_tokens"] += prompt_n
                 STATS["completion_tokens"] += predicted_n
                 STATS["total_tokens"] += prompt_n + predicted_n
+                # 更新生成速度统计
+                STATS["total_completion_time"] += elapsed
+                if STATS["total_completion_time"] > 0:
+                    STATS["completion_tokens_per_sec"] = (
+                        STATS["completion_tokens"] / STATS["total_completion_time"]
+                    )
+            # 记录本次请求数据用于图表
+            record_request_stats(prompt_n, predicted_n, elapsed)
+
         
         if backend_has_usage:
             log.info("backend already sent usage, skip injection")
