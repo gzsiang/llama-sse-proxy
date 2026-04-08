@@ -1,7 +1,7 @@
 """
 llama-sse-proxy: Ensure usage field in SSE streams for AI agent frameworks
-Version: 0.2.7 (2026-04-08)
-Verified: ✅ SSE long-connection fix, reasoning_content→content merge option, enhanced error logging
+Version: 0.2.8 (2026-04-08)
+Verified: ✅ SSE stream connection close fix, finish_reason=stop, usage at top level
 
 Original: llama.cpp's SSE streaming responses lack the `usage` field that AI
 agent frameworks (OpenClaw, etc.) need to track token usage and trigger context
@@ -1768,9 +1768,8 @@ URL:     {BACKEND}
             return
 
         # 立即发送响应头，让客户端不超时
-        # 注意：SSE 必须保持长连接，不能发 Connection: close
-        # 显式禁止 BaseHTTPRequestHandler 在响应后关闭连接
-        self.close_connection = False
+        # SSE 流式传输：流结束后必须关闭连接，否则客户端不知道数据已传完
+        # （之前设置 close_connection=False 导致 OpenClaw 一直等更多数据直到超时）
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -1792,6 +1791,8 @@ URL:     {BACKEND}
                         usage_injected = True
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
+                    # 关闭连接，让客户端知道流已结束
+                    self.close_connection = True
                     break
 
                 # 解析 chunk，提取 timings / usage / content
@@ -1844,6 +1845,8 @@ URL:     {BACKEND}
                     usage_injected = True
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
+                    # 关闭连接，让客户端知道流已结束
+                    self.close_connection = True
                     break
 
                 # 正常转发 chunk
@@ -1855,12 +1858,15 @@ URL:     {BACKEND}
 
             except queue.Empty:
                 log.error("Queue timeout in stream_post")
+                self.close_connection = True
                 break
             except (BrokenPipeError, ConnectionResetError):
                 log.info("Client disconnected, stopping SSE stream")
+                self.close_connection = True
                 break
             except Exception as e:
                 log.error(f"stream write error: {e}")
+                self.close_connection = True
                 break
 
     def _inject_usage_if_needed(self, last_timings, accumulated_content, backend_has_usage):
@@ -1896,10 +1902,10 @@ URL:     {BACKEND}
                 "\"object\":\"chat.completion.chunk\","
                 "\"created\":%d,"
                 "\"choices\":[{\"index\":0,\"delta\":{},"
-                "\"finish_reason\":\"length\","
+                "\"finish_reason\":\"stop\"}],"
                 "\"usage\":{\"prompt_tokens\":%d,"
                 "\"completion_tokens\":%d,"
-                "\"total_tokens\":%d}}]}\n\n"
+                "\"total_tokens\":%d}}\n\n"
                 % (int(time.time()), prompt_n, predicted_n, prompt_n + predicted_n)
             )
             self.wfile.write(usage_chunk.encode("utf-8"))
