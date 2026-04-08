@@ -3,5 +3,6 @@
   "port": 8081,
   "timeout": 1800,
   "log_file": null,
-  "ollama_model": "llama"
+  "ollama_model": "llama",
+  "merge_reasoning": true
 }

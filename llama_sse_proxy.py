@@ -1,7 +1,7 @@
 """
 llama-sse-proxy: Ensure usage field in SSE streams for AI agent frameworks
-Version: 0.2.4 (2026-04-08)
-Verified: ✅ History in subfolder, backend connection status with visual indicator
+Version: 0.2.7 (2026-04-08)
+Verified: ✅ SSE long-connection fix, reasoning_content→content merge option, enhanced error logging
 
 Original: llama.cpp's SSE streaming responses lack the `usage` field that AI
 agent frameworks (OpenClaw, etc.) need to track token usage and trigger context
@@ -47,6 +47,9 @@ log = logging.getLogger("llama-sse-proxy")
 BACKEND = None
 SHUTDOWN_EVENT = None
 OLLAMA_MODEL = None  # Model name exposed via Ollama API
+
+# Merge reasoning_content into content for clients that don't support thinking mode
+MERGE_REASONING = False
 
 # Stream timeout (seconds) — per-chunk interval for both fetch and main thread
 STREAM_TIMEOUT = 1800
@@ -305,6 +308,13 @@ def curl_request(method, path, body, headers, stream=False):
     """
     url = urljoin(BACKEND, path)
     log.info(f"backend_request: {method} {path} (stream={stream})")
+    # Debug: log request body (first 500 chars) — only at DEBUG level
+    if body and log.isEnabledFor(logging.DEBUG):
+        try:
+            body_preview = body[:500].decode("utf-8", errors="replace")
+            log.debug(f"backend_request body: {body_preview}")
+        except Exception:
+            pass
 
     if not stream:
         req = _build_req(url, method, body, headers)
@@ -325,11 +335,17 @@ def curl_request(method, path, body, headers, stream=False):
                 req = _build_req(url, method, body, headers)
                 req.add_header("Accept", "text/event-stream")
                 with urllib.request.urlopen(req, timeout=600) as resp:
+                    log.debug(f"fetch: backend connected, status={resp.status}")
                     buf = b""
+                    first_chunk = True
                     while True:
                         recv = resp.read(4096)
                         if not recv:
+                            log.debug(f"fetch: backend closed connection (buf leftover={len(buf)} bytes)")
                             break
+                        if first_chunk:
+                            log.debug(f"fetch: first data from backend ({len(recv)} bytes): {recv[:200]!r}")
+                            first_chunk = False
                         buf += recv
                         # Split SSE chunks — llama.cpp sometimes sends compact format:
                         #   standard:    ...}\n\ndata: {...}\n\n
@@ -375,8 +391,12 @@ def curl_request(method, path, body, headers, stream=False):
                     # Don't send incomplete data at end of stream; it will be lost
                     # (llama.cpp will close connection after sending complete chunks)
                 data_queue.put(None)
+            except urllib.error.HTTPError as e:
+                body_snippet = e.read(512) if e.fp else b""
+                log.error(f"fetch thread HTTP error: {e.code} {e.reason} | body: {body_snippet!r}")
+                data_queue.put(None)
             except Exception as e:
-                log.error(f"fetch thread error: {e}")
+                log.error(f"fetch thread error: {type(e).__name__}: {e}")
                 data_queue.put(None)
 
         thread = threading.Thread(target=fetch, daemon=True)
@@ -1730,91 +1750,31 @@ URL:     {BACKEND}
                 pass
 
     def _stream_post(self, body):
-        data_queue = queue.Queue()
         last_timings = {}
         accumulated_content = []  # 累积 delta.content，用于 usage 全零时估算
-        done_received = [False]   # [0] = fetch 线程是否收到 [DONE]
-        aborted = [False]          # [0] = fetch 线程是否检测到连接中断
         backend_has_usage = [False]  # [0] = 后端是否已返回过 usage chunk
 
-        def fetch():
+        # 立即开始向后端请求（stream=True，返回 queue）
+        try:
+            status, headers, data_queue = curl_request(
+                "POST", self.path, body, dict(self.headers), stream=True
+            )
+        except Exception as e:
+            log.error(f"stream POST backend error: {e}")
             try:
-                status, headers, chunks = curl_request(
-                    "POST", self.path, body, dict(self.headers), stream=True
-                )
-                while True:
-                    try:
-                        chunk = chunks.get(timeout=STREAM_TIMEOUT)
-                        if chunk is None:
-                            # 队列关闭（连接中断），跳出等待
-                            break
-                        # Extract timings / usage from the SSE chunk
-                        is_valid_chunk = True
-                        try:
-                            text = chunk.decode("utf-8", errors="replace")
-                            if text.startswith("data: "):
-                                data_str = text[6:].strip()
-                                if data_str == "[DONE]":
-                                    done_received[0] = True
-                                elif data_str:
-                                    obj = json.loads(data_str)
-                                    # 检测后端返回的 usage（LMStudio/Ollama 模式）
-                                    if "usage" in obj:
-                                        backend_has_usage[0] = True
-                                        usage = obj["usage"]
-                                        # 提取 token 数用于统计
-                                        last_timings["prompt_n"] = usage.get("prompt_tokens", 0)
-                                        last_timings["predicted_n"] = usage.get("completion_tokens", 0)
-                                        log.info(f"backend usage: {usage}")
-                                    # 也提取 timings（llama.cpp fallback）
-                                    timings = obj.get("timings")
-                                    choices = obj.get("choices", [])
-                                    finish = choices[0].get("finish_reason") if choices else None
-                                    # 只要有 timings 就更新，不依赖 finish
-                                    if timings:
-                                        last_timings["prompt_n"] = timings.get("prompt_n", 0)
-                                        last_timings["predicted_n"] = timings.get("predicted_n", 0)
-                                        if finish:
-                                            log.info(f"timings: prompt={last_timings['prompt_n']}, "
-                                                     f"completion={last_timings['predicted_n']}")
-                                    # 累积 delta.content 用于 usage 估算
-                                    delta = choices[0].get("delta", {}) if choices else {}
-                                    # 同时处理 content 和 reasoning_content
-                                    content = delta.get("content", "") or delta.get("reasoning_content", "")
-                                    if content:
-                                        accumulated_content.append(content)
-                        except json.JSONDecodeError:
-                            # JSON 解析失败，说明 chunk 不完整，丢弃
-                            log.warning(f"Invalid JSON chunk, dropping: {chunk[:100]}...")
-                            is_valid_chunk = False
-                        except Exception:
-                            pass
-                        if is_valid_chunk:
-                            data_queue.put(chunk)
-                    except queue.Empty:
-                        break
-                data_queue.put(None)
-            except Exception as e:
-                log.error(f"fetch thread error: {e}")
-                aborted[0] = True
-                data_queue.put(None)
-
-        thread = threading.Thread(target=fetch, daemon=True)
-        thread.start()
-        thread.join(timeout=STREAM_TIMEOUT)
-        if thread.is_alive():
-            log.error("Backend connection timeout")
-            aborted[0] = True
-            try:
-                self.send_error(504)
+                self.send_error(502)
             except Exception:
                 pass
             return
 
+        # 立即发送响应头，让客户端不超时
+        # 注意：SSE 必须保持长连接，不能发 Connection: close
+        # 显式禁止 BaseHTTPRequestHandler 在响应后关闭连接
+        self.close_connection = False
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.flush()
@@ -1824,7 +1784,7 @@ URL:     {BACKEND}
             try:
                 chunk = data_queue.get(timeout=STREAM_TIMEOUT)
                 if chunk is None:
-                    # 队列关闭（可能连接中断）；检查是否需要补发 usage
+                    # fetch 线程结束（正常或出错）；注入 usage 并发 [DONE]
                     if not usage_injected:
                         self._inject_usage_if_needed(
                             last_timings, accumulated_content, backend_has_usage[0]
@@ -1832,26 +1792,67 @@ URL:     {BACKEND}
                         usage_injected = True
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
-                    usage_injected = True
                     break
 
-                text = chunk.decode("utf-8", errors="replace")
+                # 解析 chunk，提取 timings / usage / content
+                # Optionally merge reasoning_content → content for client compat
+                modified = False
+                try:
+                    text = chunk.decode("utf-8", errors="replace")
+                    if text.startswith("data: "):
+                        data_str = text[6:].strip()
+                        if data_str and data_str != "[DONE]":
+                            obj = json.loads(data_str)
+                            # 检测后端返回的 usage（LMStudio/Ollama 模式）
+                            if "usage" in obj:
+                                backend_has_usage[0] = True
+                                usage = obj["usage"]
+                                last_timings["prompt_n"] = usage.get("prompt_tokens", 0)
+                                last_timings["predicted_n"] = usage.get("completion_tokens", 0)
+                                log.info(f"backend usage: {usage}")
+                            # 提取 timings（llama.cpp fallback）
+                            timings = obj.get("timings")
+                            choices = obj.get("choices", [])
+                            finish = choices[0].get("finish_reason") if choices else None
+                            if timings:
+                                last_timings["prompt_n"] = timings.get("prompt_n", 0)
+                                last_timings["predicted_n"] = timings.get("predicted_n", 0)
+                                if finish:
+                                    log.info(f"timings: prompt={last_timings['prompt_n']}, "
+                                             f"completion={last_timings['predicted_n']}")
+                            # 累积 delta.content 用于 usage 估算
+                            delta = choices[0].get("delta", {}) if choices else {}
+                            content = delta.get("content", "") or delta.get("reasoning_content", "")
+                            if content:
+                                accumulated_content.append(content)
+                            # Merge reasoning_content → content for client compat
+                            if MERGE_REASONING and delta.get("reasoning_content"):
+                                delta["content"] = delta.pop("reasoning_content")
+                                modified = True
+                except Exception:
+                    pass
 
-                # Intercept [DONE], inject usage chunk first, then send [DONE]
-                if not usage_injected and text.strip() == "data: [DONE]":
+                # If chunk was modified, re-encode it
+                if modified:
+                    chunk = ("data: " + json.dumps(obj, separators=(",", ":")) + "\n\n").encode("utf-8")
+
+                # 拦截 [DONE]，先注入 usage，再发 [DONE]
+                if not usage_injected and chunk.strip() == b"data: [DONE]":
                     self._inject_usage_if_needed(
                         last_timings, accumulated_content, backend_has_usage[0]
                     )
                     usage_injected = True
-                    # Skip queue [DONE]; send it explicitly after the loop
-                    continue
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                    break
 
-                # Ensure each chunk ends with \n\n for proper SSE framing
+                # 正常转发 chunk
                 if not chunk.endswith(b"\n\n"):
                     self.wfile.write(chunk + b"\n\n")
                 else:
                     self.wfile.write(chunk)
                 self.wfile.flush()
+
             except queue.Empty:
                 log.error("Queue timeout in stream_post")
                 break
@@ -1861,11 +1862,6 @@ URL:     {BACKEND}
             except Exception as e:
                 log.error(f"stream write error: {e}")
                 break
-
-        # Ensure [DONE] is always sent after usage injection
-        if usage_injected:
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
 
     def _inject_usage_if_needed(self, last_timings, accumulated_content, backend_has_usage):
         """Inject usage chunk only if the backend didn't already provide one.
@@ -2004,6 +2000,11 @@ def main():
         help="Per-chunk read timeout in seconds (default: 1800). "
              "Increase if llama.cpp takes very long between tokens.",
     )
+    parser.add_argument(
+        "--merge-reasoning", action="store_true", default=False,
+        help="Merge reasoning_content into content for clients that don't support "
+             "thinking/reasoning mode (e.g. some AI chat UIs).",
+    )
     args = parser.parse_args()
 
     # Load config file first
@@ -2015,10 +2016,12 @@ def main():
     log_file = args.log_file if args.log_file is not None else config.get("log_file")
     ollama_model = args.ollama_model if args.ollama_model is not None else config.get("ollama_model")
     timeout = args.timeout if args.timeout != parser.get_default("timeout") else config.get("timeout", args.timeout)
+    merge_reasoning = args.merge_reasoning or config.get("merge_reasoning", False)
 
-    global OLLAMA_MODEL, STREAM_TIMEOUT
+    global OLLAMA_MODEL, STREAM_TIMEOUT, MERGE_REASONING
     OLLAMA_MODEL = ollama_model
     STREAM_TIMEOUT = timeout
+    MERGE_REASONING = merge_reasoning
 
     setup_logging(log_file)
 
@@ -2050,6 +2053,8 @@ def main():
     server.timeout = 0.5  # Allow Ctrl+C check every 500ms
     log.info("Ctrl+C to stop")
     log.info(f"stream timeout: %ds", STREAM_TIMEOUT)
+    if MERGE_REASONING:
+        log.info("merge_reasoning: ON (reasoning_content -> content)")
 
     while not SHUTDOWN_EVENT.is_set():
         server.handle_request()
