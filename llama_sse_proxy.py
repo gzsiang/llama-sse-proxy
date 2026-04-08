@@ -255,8 +255,8 @@ def update_current_session():
     session["completion_tokens"] = STATS["completion_tokens"]
     session["total_requests"] = STATS["total_requests"]
     
-    # Filter out sessions with 0 requests (useless records from debugging restarts)
-    history = [h for h in history if h.get("total_requests", 0) > 0]
+    # Filter out sessions with 0 tokens (useless records with no actual usage)
+    history = [h for h in history if h.get("total_tokens", 0) > 0]
     
     # Keep only last 50 sessions
     history = history[-50:]
@@ -281,8 +281,8 @@ def finalize_session():
             h["finalized"] = True
             break
     
-    # Filter out sessions with 0 requests (useless records from debugging restarts)
-    history = [h for h in history if h.get("total_requests", 0) > 0]
+    # Filter out sessions with 0 tokens (useless records with no actual usage)
+    history = [h for h in history if h.get("total_tokens", 0) > 0]
     
     save_history(history)
 
@@ -1539,13 +1539,13 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     }
                     
-                    // Update history table (filter out sessions with 0 requests)
+                    // Update history table (filter out sessions with 0 tokens)
                     const tbody = document.getElementById('history-body');
                     tbody.innerHTML = '';
                     if (data.history && data.history.length > 0) {
                         data.history.slice().reverse().forEach(session => {
-                            // Skip sessions with 0 requests (useless records from debugging restarts)
-                            if ((session.total_requests || 0) === 0) return;
+                            // Skip sessions with 0 tokens (useless records with no actual usage)
+                            if ((session.total_tokens || 0) === 0) return;
                             const row = document.createElement('tr');
                             if (!session.finalized) row.classList.add('current-session');
                             row.innerHTML = `
