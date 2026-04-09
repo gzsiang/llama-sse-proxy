@@ -1,7 +1,7 @@
 """
 llama-sse-proxy: Ensure usage field in SSE streams for AI agent frameworks
-Version: 0.2.8 (2026-04-08)
-Verified: ✅ SSE stream connection close fix, finish_reason=stop, usage at top level
+Version: 0.2.9 (2026-04-09)
+Verified: ✅ Auto-format large token numbers (万/M units), history subfolder, connection status
 
 Original: llama.cpp's SSE streaming responses lack the `usage` field that AI
 agent frameworks (OpenClaw, etc.) need to track token usage and trigger context
@@ -1692,6 +1692,15 @@ class Handler(BaseHTTPRequestHandler):
             });
         }
         
+        function formatTokenCount(num) {
+            if (num >= 1000000) {
+                return (num / 1000000).toFixed(2) + 'M';
+            } else if (num >= 10000) {
+                return (num / 10000).toFixed(2) + '万';
+            }
+            return num.toLocaleString();
+        }
+        
         function formatDuration(seconds) {
             if (seconds < 60) return seconds + 's';
             if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
@@ -1705,9 +1714,9 @@ class Handler(BaseHTTPRequestHandler):
                 .then(data => {
                     document.getElementById('uptime-fmt').textContent = data.uptime_formatted;
                     document.getElementById('total-req').textContent = data.total_requests;
-                    document.getElementById('total-tokens').textContent = data.total_tokens.toLocaleString();
-                    document.getElementById('prompt-tokens').textContent = data.prompt_tokens.toLocaleString();
-                    document.getElementById('completion-tokens').textContent = data.completion_tokens.toLocaleString();
+                    document.getElementById('total-tokens').textContent = formatTokenCount(data.total_tokens);
+                    document.getElementById('prompt-tokens').textContent = formatTokenCount(data.prompt_tokens);
+                    document.getElementById('completion-tokens').textContent = formatTokenCount(data.completion_tokens);
                     document.getElementById('completion-speed').textContent =
                         data.completion_tokens_per_sec > 0
                             ? data.completion_tokens_per_sec.toFixed(1) + ' /s'
@@ -1736,13 +1745,13 @@ class Handler(BaseHTTPRequestHandler):
                     // Update monthly stats
                     if (data.monthly_stats) {
                         const ms = data.monthly_stats;
-                        document.getElementById('current-month-tokens').textContent = (ms.current_month_tokens || 0).toLocaleString();
+                        document.getElementById('current-month-tokens').textContent = formatTokenCount(ms.current_month_tokens || 0);
                         document.getElementById('current-month-label').textContent = ms.current_month + ' ' + (i18n[currentLang].current_month || '本月');
                         
                         const prevCard = document.getElementById('prev-month-card');
                         if (ms.previous_month && ms.previous_month_tokens !== null) {
                             prevCard.style.display = 'block';
-                            document.getElementById('prev-month-tokens').textContent = (ms.previous_month_tokens || 0).toLocaleString();
+                            document.getElementById('prev-month-tokens').textContent = formatTokenCount(ms.previous_month_tokens || 0);
                             document.getElementById('prev-month-label').textContent = ms.previous_month + ' ' + (i18n[currentLang].previous_month || '上月');
                         } else {
                             prevCard.style.display = 'none';
@@ -1762,7 +1771,7 @@ class Handler(BaseHTTPRequestHandler):
                                 <td>${session.start_time || '--'}</td>
                                 <td>${formatDuration(session.duration_seconds || 0)}</td>
                                 <td>${session.total_requests || 0}</td>
-                                <td class="token-sum">${(session.total_tokens || 0).toLocaleString()}</td>
+                                <td class="token-sum">${formatTokenCount(session.total_tokens || 0)}</td>
                             `;
                             tbody.appendChild(row);
                         });
