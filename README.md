@@ -71,25 +71,28 @@ OpenClaw 的上下文管理机制依赖流式响应中的 `usage` 字段：
 - Python 3.8+（仅使用标准库，无需 pip install）
 - `curl` 在 PATH 中（Windows 10/11 自带；Linux/macOS 通常预装）
 
-> ⚠️ **版本兼容**：本代理仅兼容 **OpenClaw 2026.3.31**。OpenClaw 2026.4.x 对 token 计算逻辑进行了重大修改（`deriveSessionTotalTokens` 改为返回当前请求的 prompt tokens 而非 session 累计值），导致上下文压缩功能失效。
->
-> 回退命令：`npm install -g openclaw@2026.3.31`
+> ⚠️ **版本兼容**：建议使用 **OpenClaw 2026.4.7+**，已修复上下文压缩问题。v0.2.1+ 代理版本支持 OpenClaw 2026.4.x 的 token 统计逻辑。
 
 ### 项目结构
 
 ```
 llama-sse-proxy/
 ├── start.bat              # 正常启动（带窗口，推荐日常使用）
-├── config.json            # 配置文件
-├── llama_sse_proxy.py     # 主程序
-├── scripts/               # 高级启动脚本
-│   ├── start_hidden.bat   # 隐藏窗口后台启动
-│   ├── start_proxy.bat    # 最小化窗口启动
-│   ├── start_proxy.ps1    # 任务计划启动（需管理员）
-│   ├── register_task.ps1  # 注册开机启动任务
-│   ├── unregister_task.ps1# 取消开机启动任务
+├── start.sh                # Linux/macOS 启动脚本
+├── config.json             # 配置文件
+├── config.json.example     # 配置示例
+├── llama_sse_proxy.py      # 主程序
+├── dashboard.html          # Web 监控面板（v0.3.0+）
+├── history/                # 请求历史记录目录（v0.3.0+）
+├── scripts/                # 高级启动脚本
+│   ├── start_hidden.bat    # 隐藏窗口后台启动
+│   ├── start_proxy.bat     # 最小化窗口启动
+│   ├── start_proxy.ps1     # 任务计划启动（需管理员）
+│   ├── register_task.ps1   # 注册开机启动任务
+│   ├── unregister_task.ps1 # 取消开机启动任务
 │   └── config.bat.example # Windows 批处理配置模板
-└── docs/                  # 文档和截图
+├── setup_startup.ps1       # 注册开机启动（用户级）
+└── docs/                   # 文档和截图
 ```
 
 ### 快速启动
@@ -111,6 +114,8 @@ llama-sse-proxy/
 - **双语支持**：点击右上角切换中文/English
 - **实时刷新**：数据每 5 秒自动更新
 - **运行状态**：显示运行时间、请求统计、Token 用量、错误计数
+- **智能单位**：Token 数量自动切换单位（个/万/M）
+- **后端状态**：实时检测后端连接，断开时红色醒目提示
 
 ### 启动方式对比
 
@@ -284,25 +289,28 @@ This proxy solves the problem through:
 - Python 3.8+ (standard library only, no pip install needed)
 - `curl` on PATH (Windows 10/11: built-in; Linux/macOS: pre-installed)
 
-> ⚠️ **Version Compatibility**: This proxy is only compatible with **OpenClaw 2026.3.31**. OpenClaw 2026.4.x changed the token calculation logic in `deriveSessionTotalTokens` — it now returns the current request's prompt tokens instead of the session's cumulative total — which breaks context compaction entirely.
->
-> Rollback: `npm install -g openclaw@2026.3.31`
+> ⚠️ **Version Compatibility**: Recommend **OpenClaw 2026.4.7+** with context compaction fixes. Proxy v0.2.1+ supports OpenClaw 2026.4.x token stats logic.
 
 ### Project Structure
 
 ```
 llama-sse-proxy/
 ├── start.bat              # Normal start (with console window, recommended)
-├── config.json            # Configuration file
-├── llama_sse_proxy.py     # Main program
-├── scripts/               # Advanced launch scripts
-│   ├── start_hidden.bat   # Hidden window (background)
-│   ├── start_proxy.bat    # Minimized window
-│   ├── start_proxy.ps1    # Task Scheduler (requires admin)
-│   ├── register_task.ps1  # Register auto-start task
-│   ├── unregister_task.ps1# Remove auto-start task
-│   └── config.bat.example # Windows batch config template
-└── docs/                  # Documentation and screenshots
+├── start.sh                # Linux/macOS startup script
+├── config.json             # Configuration file
+├── config.json.example     # Configuration example
+├── llama_sse_proxy.py      # Main program
+├── dashboard.html          # Web dashboard (v0.3.0+)
+├── history/                # Request history directory (v0.3.0+)
+├── scripts/                # Advanced launch scripts
+│   ├── start_hidden.bat    # Hidden window (background)
+│   ├── start_proxy.bat     # Minimized window
+│   ├── start_proxy.ps1     # Task Scheduler (requires admin)
+│   ├── register_task.ps1    # Register auto-start task
+│   ├── unregister_task.ps1  # Remove auto-start task
+│   └── config.bat.example   # Windows batch config template
+├── setup_startup.ps1        # Register auto-start (user-level)
+└── docs/                    # Documentation and screenshots
 ```
 
 ### Quick Start
@@ -324,6 +332,8 @@ Once the proxy is running, visit `http://localhost:8081/stats` for real-time sta
 - **Bilingual**: Click top-right to switch between Chinese/English
 - **Live refresh**: Data updates every 5 seconds
 - **Runtime stats**: Uptime, request counts, token usage, error tracking
+- **Smart units**: Token counts auto-switch units (raw/万/M)
+- **Backend status**: Real-time connection check, red alert when disconnected
 
 ### Launch Options
 
