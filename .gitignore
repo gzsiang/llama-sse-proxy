@@ -21,3 +21,6 @@ __pycache__/
 # History data (local runtime data)
 proxy_history*.json
 history/
+
+# Dashboard (optional local customization)
+# dashboard.html  # uncomment to ignore local customizations
