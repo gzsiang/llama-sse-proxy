@@ -140,15 +140,20 @@ def init_history_file(config_path=None):
     return HISTORY_FILE
 
 
-# Cache for backend model name
+# Cache for backend model name (with TTL)
 BACKEND_MODEL_NAME = None
+BACKEND_MODEL_CACHE_TIME = 0.0
+BACKEND_MODEL_CACHE_TTL = 300.0  # 5 minutes TTL
 
 def fetch_backend_model(backend_url):
     """Fetch model name from backend /v1/models or /models endpoint.
     Returns model name, "unknown" (if connected but no model), or "disconnected" (if connection failed).
+    Results are cached for 5 minutes to avoid excessive backend requests.
     """
-    global BACKEND_MODEL_NAME
-    if BACKEND_MODEL_NAME:
+    global BACKEND_MODEL_NAME, BACKEND_MODEL_CACHE_TIME
+    
+    # Return cached value if still valid (within TTL)
+    if BACKEND_MODEL_NAME and (time.time() - BACKEND_MODEL_CACHE_TIME) < BACKEND_MODEL_CACHE_TTL:
         return BACKEND_MODEL_NAME
     
     connected = False
@@ -188,20 +193,37 @@ def fetch_backend_model(backend_url):
         BACKEND_MODEL_NAME = "disconnected"
     else:
         BACKEND_MODEL_NAME = "unknown"
+    
+    # Update cache timestamp
+    BACKEND_MODEL_CACHE_TIME = time.time()
     return BACKEND_MODEL_NAME
 
 
 def load_history(year_month=None):
-    """Load history from file for a specific month.
-    If year_month is None, load current month's history.
+    """Load history from JSONL file for a specific month.
+    Each line is a JSON object representing a session.
+    Filters out sessions with 0 tokens and keeps last 50.
     """
     file_path = get_history_file_for_month(year_month) if year_month else HISTORY_FILE
     if not file_path or not file_path.exists():
         return []
     try:
+        sessions = []
         with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    session = json.loads(line)
+                    # Filter out sessions with 0 tokens (useless records)
+                    if session.get("total_tokens", 0) > 0:
+                        sessions.append(session)
+                except json.JSONDecodeError:
+                    continue
+        # Keep only last 50 sessions
+        return sessions[-50:]
+    except IOError:
         return []
 
 
@@ -231,14 +253,26 @@ def load_all_monthly_stats():
     }
 
 
+def append_history(session):
+    """Append a session to history file (JSONL format, append-only)."""
+    if not HISTORY_FILE:
+        return
+    try:
+        with HISTORY_LOCK:
+            with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(session, ensure_ascii=False) + "\n")
+    except IOError as e:
+        log.warning(f"Failed to append history: {e}")
+
 def save_history(history):
-    """Save history to file."""
+    """Save history to file (full rewrite, use append_history for append-only)."""
     if not HISTORY_FILE:
         return
     try:
         with HISTORY_LOCK:
             with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(history, f, indent=2, ensure_ascii=False)
+                for session in history:
+                    f.write(json.dumps(session, ensure_ascii=False) + "\n")
     except IOError as e:
         log.warning(f"Failed to save history: {e}")
 
@@ -251,64 +285,46 @@ def start_new_session():
 
 
 def update_current_session():
-    """Update current session in history with current stats."""
+    """Update current session in history - append-only mode (no full file rewrite)."""
     if not CURRENT_SESSION_ID:
         return
     
-    history = load_history()
+    session = {
+        "session_id": CURRENT_SESSION_ID,
+        "start_time": datetime.datetime.fromtimestamp(STATS["start_time"]).strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "duration_seconds": int(time.time() - STATS["start_time"]),
+        "total_tokens": STATS["total_tokens"],
+        "prompt_tokens": STATS["prompt_tokens"],
+        "completion_tokens": STATS["completion_tokens"],
+        "total_requests": STATS["total_requests"],
+    }
     
-    # Find or create current session
-    session = None
-    for h in history:
-        if h.get("session_id") == CURRENT_SESSION_ID:
-            session = h
-            break
-    
-    if session is None:
-        session = {
-            "session_id": CURRENT_SESSION_ID,
-            "start_time": datetime.datetime.fromtimestamp(STATS["start_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        history.append(session)
-    
-    # Update session data
-    session["end_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    session["duration_seconds"] = int(time.time() - STATS["start_time"])
-    session["total_tokens"] = STATS["total_tokens"]
-    session["prompt_tokens"] = STATS["prompt_tokens"]
-    session["completion_tokens"] = STATS["completion_tokens"]
-    session["total_requests"] = STATS["total_requests"]
-    
-    # Filter out sessions with 0 tokens (useless records with no actual usage)
-    history = [h for h in history if h.get("total_tokens", 0) > 0]
-    
-    # Keep only last 50 sessions
-    history = history[-50:]
-    
-    save_history(history)
+    # Only append if there's actual usage
+    if session["total_tokens"] > 0:
+        append_history(session)
 
 
 def finalize_session():
-    """Finalize current session on shutdown."""
+    """Finalize current session on shutdown - append-only mode."""
     if not CURRENT_SESSION_ID:
         return
     
-    history = load_history()
-    for h in history:
-        if h.get("session_id") == CURRENT_SESSION_ID:
-            h["end_time"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            h["duration_seconds"] = int(time.time() - STATS["start_time"])
-            h["total_tokens"] = STATS["total_tokens"]
-            h["prompt_tokens"] = STATS["prompt_tokens"]
-            h["completion_tokens"] = STATS["completion_tokens"]
-            h["total_requests"] = STATS["total_requests"]
-            h["finalized"] = True
-            break
+    session = {
+        "session_id": CURRENT_SESSION_ID,
+        "start_time": datetime.datetime.fromtimestamp(STATS["start_time"]).strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "duration_seconds": int(time.time() - STATS["start_time"]),
+        "total_tokens": STATS["total_tokens"],
+        "prompt_tokens": STATS["prompt_tokens"],
+        "completion_tokens": STATS["completion_tokens"],
+        "total_requests": STATS["total_requests"],
+        "finalized": True,
+    }
     
-    # Filter out sessions with 0 tokens (useless records with no actual usage)
-    history = [h for h in history if h.get("total_tokens", 0) > 0]
-    
-    save_history(history)
+    # Only append if there's actual usage
+    if session["total_tokens"] > 0:
+        append_history(session)
 
 
 def _build_req(url, method, body, headers):
@@ -1305,6 +1321,14 @@ URL:     {BACKEND}
 
         stream_start_time = time.time()  # 记录流开始时间，用于计算生成速度
         
+        # Slow client protection: set write timeout (5 seconds per chunk)
+        # This prevents blocking indefinitely when client reads slowly
+        write_timeout = 5.0
+        try:
+            self.connection.settimeout(write_timeout)
+        except Exception:
+            pass  # May fail if connection already closed
+        
         # 立即开始向后端请求（stream=True，返回 queue）
         try:
             status, headers, data_queue = curl_request(
@@ -1327,7 +1351,11 @@ URL:     {BACKEND}
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.flush()
+        try:
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, BlockingIOError):
+            log.info("Client disconnected during headers flush")
+            return
 
         usage_injected = False
         while True:
@@ -1403,18 +1431,27 @@ URL:     {BACKEND}
                     break
 
                 # 正常转发 chunk
-                if not chunk.endswith(b"\n\n"):
-                    self.wfile.write(chunk + b"\n\n")
-                else:
-                    self.wfile.write(chunk)
-                self.wfile.flush()
+                try:
+                    if not chunk.endswith(b"\n\n"):
+                        self.wfile.write(chunk + b"\n\n")
+                    else:
+                        self.wfile.write(chunk)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, BlockingIOError):
+                    log.info("Client disconnected, stopping SSE stream")
+                    self.close_connection = True
+                    break
 
             except queue.Empty:
                 log.error("Queue timeout in stream_post")
                 self.close_connection = True
                 break
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, BlockingIOError):
                 log.info("Client disconnected, stopping SSE stream")
+                self.close_connection = True
+                break
+            except TimeoutError:
+                log.warning(f"Slow client write timeout ({write_timeout}s)")
                 self.close_connection = True
                 break
             except Exception as e:
