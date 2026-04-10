@@ -1,7 +1,6 @@
 """
 llama-sse-proxy: Ensure usage field in SSE streams for AI agent frameworks
-Version: 0.3.0 (2026-04-09)
-Verified: ✅ Dashboard separated to dashboard.html (方案A)
+Version: 0.4.0 (2026-04-10)
 
 Original: llama.cpp's SSE streaming responses lack the `usage` field that AI
 agent frameworks (OpenClaw, etc.) need to track token usage and trigger context
@@ -21,8 +20,12 @@ frameworks configured with "ollama" API type to work with llama.cpp backends.
 
 Features:
 - Web dashboard (/stats) with bilingual support (zh/en) and auto-refresh
+- Web configuration interface (/setup) — zero-config startup, GUI config editor
+  with live backend testing and one-click export
 - Silent logging for polling endpoints
-- Web configuration interface (/setup) - no config file needed to start
+- Backend model name caching with 5-minute TTL
+- Append-only history files (no full rewrite)
+- Slow-client protection (5s write timeout)
 
 No external dependencies — uses only Python 3 standard library.
 """
@@ -1075,7 +1078,458 @@ class Handler(BaseHTTPRequestHandler):
             "ollama_model": getattr(self.server, 'ollama_model', None) or '',
             "timeout": getattr(self.server, 'stream_timeout', 1800),
             "log_file": getattr(self.server, 'log_file', None) or '',
+            "merge_reasoning": MERGE_REASONING,
         }
+
+    def _handle_setup_page(self):
+        """Serve the web-based configuration UI."""
+        # Check if request wants JSON (API call)
+        accept = self.headers.get("Accept", "")
+        if "application/json" in accept or self.path.endswith("/api"):
+            self._handle_setup_api()
+            return
+
+        config = self._get_current_config()
+        # Try to detect backend status
+        backend_ok = False
+        try:
+            req = urllib.request.Request(config["backend"], method="HEAD")
+            req.add_header("Accept", "*/*")
+            with urllib.request.urlopen(req, timeout=5):
+                backend_ok = True
+        except Exception:
+            pass
+
+        # Try to fetch backend model
+        backend_model = ""
+        try:
+            req = urllib.request.Request(
+                urllib.parse.urljoin(config["backend"], "/v1/models"),
+                headers={"Accept": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("data"):
+                    backend_model = data["data"][0].get("id", "")
+                elif isinstance(data, list) and data:
+                    backend_model = data[0].get("id", "")
+        except Exception:
+            pass
+
+        config_json = json.dumps(config, ensure_ascii=False)
+        lang = "zh"
+        html = f"""<!DOCTYPE html>
+<html lang="{lang}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llama-sse-proxy - Setup</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #0f172a; color: #e2e8f0; min-height: 100vh;
+        display: flex; flex-direction: column; align-items: center; padding: 40px 20px; }}
+
+.header {{ display: flex; align-items: center; gap: 12px; margin-bottom: 32px; }}
+.logo {{ width: 40px; height: 40px; background: linear-gradient(135deg, #6366f1, #8b5cf6);
+         border-radius: 10px; display: flex; align-items: center; justify-content: center;
+         font-size: 20px; font-weight: bold; }}
+h1 {{ font-size: 22px; font-weight: 600; color: #f1f5f9; }}
+
+.card {{ background: #1e293b; border: 1px solid #334155; border-radius: 16px;
+         width: 100%; max-width: 680px; padding: 32px; margin-bottom: 24px; }}
+h2 {{ font-size: 16px; font-weight: 600; color: #94a3b8; text-transform: uppercase;
+     letter-spacing: 0.5px; margin-bottom: 24px; border-bottom: 1px solid #334155;
+     padding-bottom: 12px; }}
+
+.status-bar {{ display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 24px; }}
+.status-item {{ display: flex; align-items: center; gap: 8px; font-size: 14px; }}
+.status-dot {{ width: 8px; height: 8px; border-radius: 50%; }}
+.dot-green {{ background: #22c55e; box-shadow: 0 0 6px #22c55e; }}
+.dot-red {{ background: #ef4444; box-shadow: 0 0 6px #ef4444; }}
+.dot-gray {{ background: #64748b; }}
+
+.form-group {{ margin-bottom: 20px; }}
+label {{ display: block; font-size: 14px; font-weight: 500; color: #cbd5e1;
+          margin-bottom: 6px; }}
+.label-desc {{ font-size: 12px; color: #64748b; margin-bottom: 6px; }}
+input[type="text"], input[type="number"] {{
+    width: 100%; padding: 10px 14px; background: #0f172a; border: 1px solid #334155;
+    border-radius: 8px; color: #f1f5f9; font-size: 14px; font-family: monospace;
+    transition: border-color 0.2s;
+}}
+input:focus {{ outline: none; border-color: #6366f1; }}
+input:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+
+.toggle-wrap {{ display: flex; align-items: center; gap: 12px; }}
+.toggle {{ position: relative; width: 44px; height: 24px; }}
+.toggle input {{ opacity: 0; width: 0; height: 0; }}
+.toggle-slider {{ position: absolute; cursor: pointer; inset: 0;
+                   background: #334155; border-radius: 24px; transition: 0.2s; }}
+.toggle-slider:before {{ position: absolute; content: ""; height: 18px; width: 18px;
+                          left: 3px; bottom: 3px; background: white; border-radius: 50%;
+                          transition: 0.2s; }}
+.toggle input:checked + .toggle-slider {{ background: #6366f1; }}
+.toggle input:checked + .toggle-slider:before {{ transform: translateX(20px); }}
+
+.btn-row {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 28px; }}
+.btn {{ padding: 10px 20px; border-radius: 8px; font-size: 14px; font-weight: 500;
+       cursor: pointer; border: none; transition: all 0.2s; }}
+.btn-primary {{ background: #6366f1; color: white; }}
+.btn-primary:hover {{ background: #4f46e5; }}
+.btn-secondary {{ background: #334155; color: #e2e8f0; }}
+.btn-secondary:hover {{ background: #475569; }}
+.btn-success {{ background: #16a34a; color: white; }}
+.btn-success:hover {{ background: #15803d; }}
+.btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+
+.alert {{ padding: 12px 16px; border-radius: 8px; margin-top: 16px; font-size: 14px;
+          display: none; }}
+.alert-success {{ background: rgba(34,197,94,0.15); border: 1px solid #22c55e; color: #86efac; }}
+.alert-error {{ background: rgba(239,68,68,0.15); border: 1px solid #ef4444; color: #fca5a5; }}
+.alert-info {{ background: rgba(99,102,241,0.15); border: 1px solid #6366f1; color: #a5b4fc; }}
+
+.info-box {{ background: rgba(99,102,241,0.1); border: 1px solid #4338ca;
+             border-radius: 8px; padding: 12px 16px; font-size: 13px;
+             color: #a5b4fc; line-height: 1.6; margin-top: 16px; }}
+.nav-links {{ display: flex; gap: 20px; margin-bottom: 24px; width: 100%; max-width: 680px; }}
+.nav-link {{ color: #64748b; text-decoration: none; font-size: 14px; padding-bottom: 2px;
+              border-bottom: 2px solid transparent; transition: all 0.2s; }}
+.nav-link:hover, .nav-link.active {{ color: #e2e8f0; border-color: #6366f1; }}
+footer {{ color: #475569; font-size: 12px; margin-top: 20px; text-align: center; }}
+footer a {{ color: #6366f1; text-decoration: none; }}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">S</div>
+  <h1>llama-sse-proxy Setup</h1>
+</div>
+
+<nav class="nav-links">
+  <a href="/stats" class="nav-link">Dashboard</a>
+  <a href="/setup" class="nav-link active">Setup</a>
+</nav>
+
+<div class="card">
+  <h2>Backend Status</h2>
+  <div class="status-bar">
+    <div class="status-item">
+      <span class="status-dot {'dot-green' if backend_ok else 'dot-red'}"></span>
+      <span>{'Connected' if backend_ok else 'Disconnected'}</span>
+    </div>
+    <div class="status-item">
+      <span class="status-dot {'dot-green' if backend_model else 'dot-gray'}"></span>
+      <span style="font-family:monospace">{backend_model or 'No model info'}</span>
+    </div>
+    <div class="status-item">
+      <span style="color:#94a3b8">Port:</span>
+      <span style="font-family:monospace">{config['port']}</span>
+    </div>
+  </div>
+  <div class="form-group" style="margin-bottom:0">
+    <div class="label-desc">Proxy Backend URL</div>
+    <div style="display:flex;gap:8px">
+      <input type="text" id="inputBackend" value="{config['backend']}" style="flex:1">
+      <button class="btn btn-secondary" onclick="testBackend()" id="btnTest">Test</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>General Settings</h2>
+
+  <div class="form-group">
+    <label>Listen Port</label>
+    <div class="label-desc">Requires restart to take effect (restart the proxy process).</div>
+    <input type="number" id="inputPort" value="{config['port']}" min="1" max="65535">
+  </div>
+
+  <div class="form-group">
+    <label>Stream Timeout (seconds)</label>
+    <div class="label-desc">Per-chunk read timeout. Increase if the model takes very long between tokens.</div>
+    <input type="number" id="inputTimeout" value="{config['timeout']}" min="10" max="86400">
+  </div>
+
+  <div class="form-group">
+    <label>Log File (optional)</label>
+    <div class="label-desc">Leave empty for stdout-only logging.</div>
+    <input type="text" id="inputLogFile" value="{config['log_file'] or ''}" placeholder="e.g. proxy.log">
+  </div>
+</div>
+
+<div class="card">
+  <h2>Ollama Compatibility</h2>
+
+  <div class="form-group">
+    <label>Ollama Model Name</label>
+    <div class="label-desc">Enable Ollama API mode with this model name. Leave empty to disable Ollama endpoints (/api/chat, /api/generate, /api/tags).</div>
+    <input type="text" id="inputOllamaModel" value="{config['ollama_model'] or ''}" placeholder="e.g. llama3.2, qwen2.5 (empty = disabled)">
+  </div>
+
+  <div class="form-group" style="margin-bottom:0">
+    <div class="toggle-wrap">
+      <label class="toggle">
+        <input type="checkbox" id="inputMergeReasoning" {'checked' if config['merge_reasoning'] else ''}>
+        <span class="toggle-slider"></span>
+      </label>
+      <div>
+        <div style="font-size:14px;font-weight:500;color:#cbd5e1">Merge reasoning_content → content</div>
+        <div class="label-desc" style="margin:0">For clients that don't support thinking/reasoning mode</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Actions</h2>
+  <div class="btn-row">
+    <button class="btn btn-primary" onclick="saveConfig()">Save Config</button>
+    <button class="btn btn-secondary" onclick="resetDefaults()">Reset Defaults</button>
+    <button class="btn btn-success" onclick="exportConfig()">Export JSON</button>
+  </div>
+  <div id="alertSuccess" class="alert alert-success"></div>
+  <div id="alertError" class="alert alert-error"></div>
+  <div id="alertInfo" class="alert alert-info">
+    Settings take effect immediately except for <strong>Port</strong>, which requires a proxy restart.
+  </div>
+</div>
+
+<footer>
+  llama-sse-proxy v0.3.0 &middot; <a href="/stats">Dashboard</a> &middot; <a href="https://github.com/gzsiang/llama-sse-proxy" target="_blank">GitHub</a>
+</footer>
+
+<script>
+const cfg = {config_json};
+
+function $(id) {{ return document.getElementById(id); }}
+
+function showAlert(id, msg, duration = 4000) {{
+  const el = $(id);
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', duration);
+}}
+
+function saveConfig() {{
+  const port = parseInt($('inputPort').value);
+  if (!port || port < 1 || port > 65535) {{
+    showAlert('alertError', 'Port must be between 1 and 65535');
+    return;
+  }}
+
+  const payload = {{
+    backend: $('inputBackend').value.trim(),
+    port: port,
+    timeout: parseInt($('inputTimeout').value) || 1800,
+    log_file: $('inputLogFile').value.trim() || null,
+    ollama_model: $('inputOllamaModel').value.trim() || null,
+    merge_reasoning: $('inputMergeReasoning').checked,
+  }};
+
+  fetch('/setup/api', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify(payload),
+  }})
+  .then(r => r.json())
+  .then(data => {{
+    if (data.ok) {{
+      showAlert('alertSuccess', 'Config saved! ' + (data.needs_restart ? 'Port changed — restart proxy to apply.' : 'Applied immediately.'));
+      if (data.needs_restart) $('alertInfo').style.display = 'block';
+    }} else {{
+      showAlert('alertError', 'Error: ' + (data.error || 'Unknown error'));
+    }}
+  }})
+  .catch(e => showAlert('alertError', 'Request failed: ' + e.message));
+}}
+
+function resetDefaults() {{
+  if (!confirm('Reset all settings to defaults?')) return;
+  fetch('/setup/api', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ __action: 'reset' }}),
+  }})
+  .then(r => r.json())
+  .then(data => {{
+    if (data.ok) {{
+      location.reload();
+    }} else {{
+      showAlert('alertError', data.error || 'Reset failed');
+    }}
+  }});
+}}
+
+function exportConfig() {{
+  const payload = {{
+    backend: $('inputBackend').value.trim(),
+    port: parseInt($('inputPort').value),
+    timeout: parseInt($('inputTimeout').value) || 1800,
+    log_file: $('inputLogFile').value.trim() || null,
+    ollama_model: $('inputOllamaModel').value.trim() || null,
+    merge_reasoning: $('inputMergeReasoning').checked,
+  }};
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {{ type: 'application/json' }});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'config.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}}
+
+function testBackend() {{
+  const url = $('inputBackend').value.trim();
+  const btn = $('btnTest');
+  btn.textContent = 'Testing...';
+  btn.disabled = true;
+  fetch('/setup/api', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ __action: 'test_backend', backend: url }}),
+  }})
+  .then(r => r.json())
+  .then(data => {{
+    if (data.ok) {{
+      showAlert('alertSuccess', 'Backend OK! Model: ' + (data.model || 'unknown'));
+    }} else {{
+      showAlert('alertError', 'Backend unreachable: ' + (data.error || 'connection failed'));
+    }}
+  }})
+  .catch(e => showAlert('alertError', 'Test failed: ' + e.message))
+  .finally(() => {{
+    btn.textContent = 'Test';
+    btn.disabled = false;
+  }});
+}}
+</script>
+</body>
+</html>"""
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_setup_api(self, body=b"{}"):
+        """Handle /setup/api GET (current config) and POST (save/test/reset)."""
+        import urllib.parse
+
+        config = self._get_current_config()
+
+        if self.command == "GET":
+            body = json.dumps({"ok": True, "config": config}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # POST — body was already read by do_POST
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            _send_json_response(self, 400, {"ok": False, "error": f"Invalid JSON: {body!r}"})
+            return
+
+        action = data.get("__action")
+
+        if action == "reset":
+            # Write default config to file
+            config_path = self._get_config_path()
+            save_ok = save_config(config_path, DEFAULT_CONFIG)
+            _send_json_response(self, 200, {"ok": save_ok,
+                "message": "Defaults written to config.json — restart to apply."})
+            return
+
+        if action == "test_backend":
+            backend = data.get("backend", "")
+            if not backend:
+                _send_json_response(self, 200, {"ok": False, "error": "Backend URL is empty"})
+                return
+            try:
+                req = urllib.request.Request(backend, method="HEAD")
+                req.add_header("Accept", "*/*")
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    ok = True
+            except Exception as e:
+                _send_json_response(self, 200, {"ok": False, "error": str(e)})
+                return
+
+            # Try to fetch model name
+            model = ""
+            try:
+                req = urllib.request.Request(
+                    urllib.parse.urljoin(backend, "/v1/models"),
+                    headers={"Accept": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    rd = json.loads(resp.read().decode("utf-8"))
+                    if rd.get("data"):
+                        model = rd["data"][0].get("id", "")
+                    elif isinstance(rd, list) and rd:
+                        model = rd[0].get("id", "")
+            except Exception:
+                pass
+
+            _send_json_response(self, 200, {"ok": True, "model": model})
+            return
+
+        # Normal config save
+        # Build new config
+        new_config = {}
+        new_config["backend"] = data.get("backend", config["backend"])
+        new_config["port"] = data.get("port", config["port"])
+        new_config["timeout"] = data.get("timeout", config["timeout"])
+        new_config["log_file"] = data.get("log_file") if data.get("log_file") else None
+        new_config["ollama_model"] = data.get("ollama_model") if data.get("ollama_model") else None
+        new_config["merge_reasoning"] = bool(data.get("merge_reasoning"))
+
+        # Validate
+        if not new_config["backend"]:
+            _send_json_response(self, 200, {"ok": False, "error": "Backend URL cannot be empty"})
+            return
+        if not (1 <= new_config["port"] <= 65535):
+            _send_json_response(self, 200, {"ok": False, "error": "Port must be between 1 and 65535"})
+            return
+
+        # Determine if port changed (requires restart)
+        needs_restart = new_config["port"] != config["port"]
+
+        # Apply runtime changes immediately (except port)
+        global BACKEND, OLLAMA_MODEL, STREAM_TIMEOUT, MERGE_REASONING
+        BACKEND = new_config["backend"]
+        if new_config.get("ollama_model"):
+            OLLAMA_MODEL = new_config["ollama_model"]
+        else:
+            OLLAMA_MODEL = None
+        STREAM_TIMEOUT = new_config["timeout"]
+        MERGE_REASONING = new_config["merge_reasoning"]
+
+        # Save to file
+        config_path = self._get_config_path()
+        save_ok = save_config(config_path, new_config)
+
+        if save_ok:
+            log.info(f"Config saved via web UI: backend={BACKEND}, port={new_config['port']}, "
+                     f"ollama={OLLAMA_MODEL}, merge={MERGE_REASONING}")
+            _send_json_response(self, 200, {
+                "ok": True,
+                "needs_restart": needs_restart,
+                "config": new_config,
+            })
+        else:
+            _send_json_response(self, 200, {
+                "ok": False,
+                "error": "Failed to write config file — check file permissions.",
+            })
 
     def do_GET(self):
         path = self.path.split("?")[0]  # strip query params
@@ -1087,8 +1541,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Setup/configuration endpoint - Web-based configuration UI
-        if path == "/setup":
+        if path == "/setup" or path == "/setup/":
             self._handle_setup_page()
+            return
+        if path.startswith("/setup/api"):
+            self._handle_setup_api()
             return
 
         # Test endpoint - simulate a request to verify token stats work
@@ -1256,6 +1713,11 @@ URL:     {BACKEND}
         body = self.rfile.read(content_length) if content_length else b"{}"
 
         path = self.path.split("?")[0]
+
+        # Setup API endpoint
+        if path.startswith("/setup/api"):
+            self._handle_setup_api(body)
+            return
 
         # Ollama API endpoints
         if OLLAMA_MODEL is not None:
@@ -1534,11 +1996,18 @@ class ThreadedServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, port, backend):
+    def __init__(self, port, backend, config_path=None, ollama_model=None,
+                 stream_timeout=1800, log_file=None):
         super().__init__(("", port), Handler)
         global BACKEND
         BACKEND = backend
-        mode = f" + Ollama mode (model={OLLAMA_MODEL})" if OLLAMA_MODEL else ""
+        self.backend_url = backend
+        self.server_port = port
+        self.config_path = config_path or "config.json"
+        self.ollama_model = ollama_model
+        self.stream_timeout = stream_timeout
+        self.log_file = log_file
+        mode = f" + Ollama mode (model={ollama_model})" if ollama_model else ""
         log.info(f"llama-sse-proxy: 0.0.0.0:{port} -> {backend}{mode}")
 
     def process_request(self, request, client_address):
@@ -1663,7 +2132,13 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    server = ThreadedServer(port, backend)
+    server = ThreadedServer(
+        port, backend,
+        config_path=args.config or "config.json",
+        ollama_model=ollama_model,
+        stream_timeout=timeout,
+        log_file=log_file,
+    )
     server.timeout = 0.5  # Allow Ctrl+C check every 500ms
     log.info("Ctrl+C to stop")
     log.info(f"stream timeout: %ds", STREAM_TIMEOUT)

@@ -117,6 +117,24 @@ llama-sse-proxy/
 - **智能单位**：Token 数量自动切换单位（个/万/M）
 - **后端状态**：实时检测后端连接，断开时红色醒目提示
 
+### Web 配置界面（零配置启动）
+
+不需要创建配置文件，直接启动代理：
+
+```bat
+python llama_sse_proxy.py
+```
+
+然后访问 `http://localhost:8081/setup` 打开图形配置界面：
+
+![Setup](docs/images/setup.jpg)
+
+- **零配置启动**：无需 `config.json`，所有参数使用默认值
+- **实时后端检测**：显示后端连接状态和模型名称
+- **一键测试**：输入 Backend URL 后点击 Test 验证连接
+- **导出配置**：点击 Export JSON 下载 `config.json` 文件
+- **保存即生效**：除 Port 外，其他参数保存后立即生效
+
 ### 启动方式对比
 
 | 方式 | 命令 | 特点 |
@@ -334,6 +352,24 @@ Once the proxy is running, visit `http://localhost:8081/stats` for real-time sta
 - **Runtime stats**: Uptime, request counts, token usage, error tracking
 - **Smart units**: Token counts auto-switch units (raw/万/M)
 - **Backend status**: Real-time connection check, red alert when disconnected
+
+### Web Setup UI (Zero-Config Startup)
+
+No config file needed — just start the proxy:
+
+```bash
+python llama_sse_proxy.py
+```
+
+Then open `http://localhost:8081/setup` in your browser:
+
+![Setup](docs/images/setup.jpg)
+
+- **Zero-config**: All settings use sensible defaults, no `config.json` required
+- **Live backend check**: Shows connection status and detected model name
+- **One-click test**: Test backend connectivity before saving
+- **Export JSON**: Download `config.json` to persist settings
+- **Live apply**: All changes take effect immediately except Port (requires restart)
 
 ### Launch Options
 
