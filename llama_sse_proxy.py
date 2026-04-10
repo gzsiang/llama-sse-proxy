@@ -200,30 +200,38 @@ def fetch_backend_model(backend_url):
 
 
 def load_history(year_month=None):
-    """Load history from JSONL file for a specific month.
-    Each line is a JSON object representing a session.
-    Filters out sessions with 0 tokens and keeps last 50.
+    """Load history from JSONL file (one JSON object per line).
+    Auto-migrates legacy JSON array format to JSONL on first read.
     """
     file_path = get_history_file_for_month(year_month) if year_month else HISTORY_FILE
     if not file_path or not file_path.exists():
         return []
     try:
+        raw = file_path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return []
+
+        # Detect and migrate legacy JSON array format
+        if raw.startswith("["):
+            sessions = [s for s in json.loads(raw) if s.get("total_tokens", 0) > 0]
+            with HISTORY_LOCK:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    for s in sessions:
+                        f.write(json.dumps(s, ensure_ascii=False) + "\n")
+            log.info(f"Migrated {len(sessions)} sessions to JSONL format")
+            return sessions[-50:]
+
+        # Normal JSONL read
         sessions = []
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    session = json.loads(line)
-                    # Filter out sessions with 0 tokens (useless records)
-                    if session.get("total_tokens", 0) > 0:
-                        sessions.append(session)
-                except json.JSONDecodeError:
-                    continue
-        # Keep only last 50 sessions
+        for line in raw.splitlines():
+            try:
+                s = json.loads(line)
+                if s.get("total_tokens", 0) > 0:
+                    sessions.append(s)
+            except json.JSONDecodeError:
+                continue
         return sessions[-50:]
-    except IOError:
+    except (IOError, json.JSONDecodeError):
         return []
 
 
