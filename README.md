@@ -1,10 +1,23 @@
 # llama-sse-proxy
 
+> **📢 公告 (Announcement)**
+> 
+> 本项目的核心使命——解决 OpenClaw 的上下文用量追踪问题——已圆满完成。相关 Bug 已通过 PR [#64660](https://github.com/openclaw/openclaw/pull/64660) 被合并至 OpenClaw 主仓库，预计将在下一个 Release 版本中正式修复。
+> 
+> ---
+> 
+> **📢 Announcement**
+> 
+> The core mission of this project—solving the OpenClaw context usage tracking issue—has been successfully accomplished. The relevant bug has been fixed via PR [#64660](https://github.com/openclaw/openclaw/pull/64660) and merged into the main OpenClaw repository, with a fix expected in the upcoming release.
+
+---
+
 **[中文](#中文)** · **[English](#english)**
 
 ---
 
 ## 中文
+...
 
 ### 🚀 是什么？
 
