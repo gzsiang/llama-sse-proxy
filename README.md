@@ -1,3 +1,9 @@
+<h4 align="center">
+  English | <a href="./README.zh.md">中文</a>
+</h4>
+
+<br />
+
 # llama-sse-proxy
 
 > **📢 公告 (Announcement)**
